@@ -3574,6 +3574,25 @@ impl Window {
         answers: &[&str],
         cx: &mut App,
     ) -> oneshot::Receiver<usize> {
+        // TODO - This currently solves the issue of the modifiers not being
+        // reset after the prompt is closed, leading to multiple files being
+        // selected in the file explorer, as if `shift` was held. However,
+        // it does so by simulating the event that would be sent whenever a key
+        // like `shift` is released. We should probably make it so that the
+        // prompt does not capture all keystrokes.
+        self.dispatch_event(
+            PlatformInput::ModifiersChanged(ModifiersChangedEvent {
+                modifiers: Modifiers {
+                    control: false,
+                    alt: false,
+                    shift: false,
+                    platform: false,
+                    function: false,
+                },
+            }),
+            cx,
+        );
+
         let prompt_builder = cx.prompt_builder.take();
         let Some(prompt_builder) = prompt_builder else {
             unreachable!("Re-entrant window prompting is not supported by GPUI");

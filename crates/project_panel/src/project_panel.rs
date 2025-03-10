@@ -20,9 +20,10 @@ use gpui::{
     actions, anchored, deferred, div, impl_actions, point, px, size, uniform_list, Action,
     AnyElement, App, ArcCow, AsyncWindowContext, Bounds, ClipboardItem, Context, DismissEvent, Div,
     DragMoveEvent, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, Hsla,
-    InteractiveElement, KeyContext, ListHorizontalSizingBehavior, ListSizingBehavior, MouseButton,
-    MouseDownEvent, ParentElement, Pixels, Point, PromptLevel, Render, ScrollStrategy, Stateful,
-    Styled, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
+    InteractiveElement, KeyContext, ListHorizontalSizingBehavior, ListSizingBehavior, Modifiers,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, ParentElement, Pixels, PlatformInput,
+    Point, PromptLevel, Render, ScrollStrategy, Stateful, Styled, Subscription, Task,
+    UniformListScrollHandle, WeakEntity, Window,
 };
 use indexmap::IndexMap;
 use language::DiagnosticSeverity;
@@ -1493,6 +1494,7 @@ impl ProjectPanel {
             } else {
                 None
             };
+
             let next_selection = self.find_next_selection_after_deletion(items_to_delete, cx);
             cx.spawn_in(window, |panel, mut cx| async move {
                 if let Some(answer) = answer {
@@ -1662,6 +1664,8 @@ impl ProjectPanel {
     }
 
     fn select_next(&mut self, _: &SelectNext, window: &mut Window, cx: &mut Context<Self>) {
+        println!("EDIT STATE - {:?}", self.edit_state);
+        println!("SELECTION - {:?}", self.selection);
         if let Some(edit_state) = &self.edit_state {
             if edit_state.processing_filename.is_none() {
                 self.filename_editor.update(cx, |editor, cx| {
@@ -1697,6 +1701,7 @@ impl ProjectPanel {
                     };
                     self.selection = Some(selection);
                     if window.modifiers().shift {
+                        println!("SHIFTING!");
                         self.marked_entries.insert(selection);
                     }
 
