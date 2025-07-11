@@ -192,7 +192,7 @@ impl ProjectDiagnosticsEditor {
                     };
 
                     this.paths_to_update.insert(path.clone());
-                    this.summary = project.read(cx).diagnostic_summary(false, cx);
+                    this.summary = project.read(cx).diagnostic_summary_for_paths(this.path_matcher.as_ref(), false, cx);
                     cx.emit(EditorEvent::TitleChanged);
 
                     if this.editor.focus_handle(cx).contains_focused(window, cx) || this.focus_handle.contains_focused(window, cx) {
@@ -275,7 +275,7 @@ impl ProjectDiagnosticsEditor {
         let project = project_handle.read(cx);
         let mut this = Self {
             project: project_handle.clone(),
-            summary: project.diagnostic_summary(false, cx),
+            summary: project.diagnostic_summary_for_paths(path_matcher.as_ref(), false, cx),
             diagnostics: Default::default(),
             blocks: Default::default(),
             include_warnings,
