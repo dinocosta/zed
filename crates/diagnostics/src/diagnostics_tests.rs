@@ -112,7 +112,8 @@ async fn test_diagnostics(cx: &mut TestAppContext) {
     let diagnostics = window.build_entity(cx, |window, cx| {
         ProjectDiagnosticsEditor::new(
             true,
-            None,
+            Default::default(),
+            false,
             project.clone(),
             workspace.downgrade(),
             window,
@@ -350,7 +351,8 @@ async fn test_diagnostics_with_folds(cx: &mut TestAppContext) {
     let diagnostics = window.build_entity(cx, |window, cx| {
         ProjectDiagnosticsEditor::new(
             true,
-            None,
+            Default::default(),
+            false,
             project.clone(),
             workspace.downgrade(),
             window,
@@ -466,7 +468,8 @@ async fn test_diagnostics_multiple_servers(cx: &mut TestAppContext) {
     let diagnostics = window.build_entity(cx, |window, cx| {
         ProjectDiagnosticsEditor::new(
             true,
-            None,
+            Default::default(),
+            false,
             project.clone(),
             workspace.downgrade(),
             window,
@@ -683,7 +686,8 @@ async fn test_random_diagnostics_blocks(cx: &mut TestAppContext, mut rng: StdRng
     let mutated_diagnostics = window.build_entity(cx, |window, cx| {
         ProjectDiagnosticsEditor::new(
             true,
-            None,
+            Default::default(),
+            false,
             project.clone(),
             workspace.downgrade(),
             window,
@@ -800,7 +804,8 @@ async fn test_random_diagnostics_blocks(cx: &mut TestAppContext, mut rng: StdRng
     let reference_diagnostics = window.build_entity(cx, |window, cx| {
         ProjectDiagnosticsEditor::new(
             true,
-            None,
+            Default::default(),
+            false,
             project.clone(),
             workspace.downgrade(),
             window,
@@ -860,7 +865,8 @@ async fn test_random_diagnostics_with_inlays(cx: &mut TestAppContext, mut rng: S
     let mutated_diagnostics = window.build_entity(cx, |window, cx| {
         ProjectDiagnosticsEditor::new(
             true,
-            None,
+            Default::default(),
+            false,
             project.clone(),
             workspace.downgrade(),
             window,
@@ -1462,7 +1468,8 @@ async fn test_diagnostics_with_code(cx: &mut TestAppContext) {
     let diagnostics = window.build_entity(cx, |window, cx| {
         ProjectDiagnosticsEditor::new(
             true,
-            None,
+            Default::default(),
+            false,
             project.clone(),
             workspace.downgrade(),
             window,

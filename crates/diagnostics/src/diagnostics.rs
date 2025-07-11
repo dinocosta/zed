@@ -81,9 +81,13 @@ pub(crate) struct ProjectDiagnosticsEditor {
     multibuffer: Entity<MultiBuffer>,
     paths_to_update: BTreeSet<ProjectPath>,
     include_warnings: bool,
-    /// When provided, this determines whether only diagnostics for this file
-    /// should be shown.
-    path_matcher: Option<PathMatcher>,
+    /// In conjunction with `path_matcher_enabled`, determines whether
+    /// diagnostics for all paths should be shown, or only for paths that match
+    /// the `path_matcher`.
+    path_matcher: PathMatcher,
+    /// Controls whether diagnostics for only the paths that match the
+    /// `path_matcher` should be displayed.
+    path_matcher_enabled: bool,
     update_excerpts_task: Option<Task<Result<()>>>,
     cargo_diagnostics_fetch: CargoDiagnosticsFetchState,
     _subscription: Subscription,
@@ -108,11 +112,14 @@ impl Render for ProjectDiagnosticsEditor {
         };
 
         let child = if warning_count + self.summary.error_count == 0 {
-            let files_str = match self.path_matcher.clone() {
-                None => None,
-                Some(path_matcher) if path_matcher.sources().is_empty() => None,
-                Some(path_matcher) => Some(
-                    path_matcher
+            let files_str = match (
+                self.path_matcher_enabled,
+                self.path_matcher.sources().is_empty(),
+            ) {
+                (false, _) => None,
+                (true, true) => None,
+                (true, false) => Some(
+                    self.path_matcher
                         .sources()
                         .iter()
                         .map(|path| path.to_string())
@@ -182,7 +189,8 @@ impl ProjectDiagnosticsEditor {
 
     fn new(
         include_warnings: bool,
-        path_matcher: Option<PathMatcher>,
+        path_matcher: PathMatcher,
+        path_matcher_enabled: bool,
         project_handle: Entity<Project>,
         workspace: WeakEntity<Workspace>,
         window: &mut Window,
@@ -201,13 +209,17 @@ impl ProjectDiagnosticsEditor {
                     language_server_id,
                     path,
                 } => {
-                    if let Some(path_matcher) = &this.path_matcher && !path_matcher.is_match(path.path.clone()) {
+                    // TODO: Double-check if we really need this. Would it be problematic to process this event as usual?
+                    if this.path_matcher_enabled && this.path_matcher.is_match(path.path.clone()) {
                         log::debug!("diagnostics ignored for server {language_server_id}, path {path:?}. path filter mismatch");
                         return;
                     };
 
                     this.paths_to_update.insert(path.clone());
-                    this.summary = project.read(cx).diagnostic_summary_for_paths(this.path_matcher.as_ref(), false, cx);
+                    this.summary = match this.path_matcher_enabled {
+                        true => project.read(cx).diagnostic_summary_for_paths(Some(&this.path_matcher), false, cx),
+                        false => project.read(cx).diagnostic_summary(false, cx),
+                    };
                     cx.emit(EditorEvent::TitleChanged);
 
                     if this.editor.focus_handle(cx).contains_focused(window, cx) || this.focus_handle.contains_focused(window, cx) {
@@ -290,11 +302,15 @@ impl ProjectDiagnosticsEditor {
         let project = project_handle.read(cx);
         let mut this = Self {
             project: project_handle.clone(),
-            summary: project.diagnostic_summary_for_paths(path_matcher.as_ref(), false, cx),
+            summary: match path_matcher_enabled {
+                true => project.diagnostic_summary_for_paths(Some(&path_matcher), false, cx),
+                false => project.diagnostic_summary(false, cx),
+            },
             diagnostics: Default::default(),
             blocks: Default::default(),
             include_warnings,
             path_matcher,
+            path_matcher_enabled,
             workspace,
             multibuffer: excerpts,
             focus_handle,
@@ -372,7 +388,8 @@ impl ProjectDiagnosticsEditor {
             let diagnostics = cx.new(|cx| {
                 ProjectDiagnosticsEditor::new(
                     include_warnings,
-                    None,
+                    Default::default(),
+                    false,
                     workspace.project().clone(),
                     workspace_handle,
                     window,
@@ -416,21 +433,20 @@ impl ProjectDiagnosticsEditor {
                 None => ProjectSettings::get_global(cx).diagnostics.include_warnings,
             };
 
-            let path_matcher = match path {
-                Some(project_path) => {
-                    if let Some(path_str) = project_path.path.to_str() {
-                        PathMatcher::new([path_str]).ok()
-                    } else {
-                        None
-                    }
-                }
-                None => None,
+            let path_matcher = if let Some(project_path) = path
+                && let Some(path_str) = project_path.path.to_str()
+                && let Ok(path_matcher) = PathMatcher::new([path_str])
+            {
+                path_matcher
+            } else {
+                PathMatcher::default()
             };
 
             let diagnostics = cx.new(|cx| {
                 ProjectDiagnosticsEditor::new(
                     include_warnings,
                     path_matcher,
+                    true,
                     workspace.project().clone(),
                     workspace_handle,
                     window,
@@ -558,9 +574,10 @@ impl ProjectDiagnosticsEditor {
             let mut project_paths = project
                 .diagnostic_summaries(false, cx)
                 .map(|(project_path, _, _)| project_path)
-                .filter(|project_path| match self.path_matcher.clone() {
-                    Some(path_matcher) => path_matcher.is_match(project_path.path.clone()),
-                    None => true,
+                .filter(|project_path| {
+                    !self.path_matcher_enabled
+                        || self.path_matcher_enabled
+                            && self.path_matcher.is_match(project_path.path.clone())
                 })
                 .collect::<BTreeSet<_>>();
 
@@ -787,15 +804,12 @@ impl ProjectDiagnosticsEditor {
     }
 
     fn set_path_filter(&mut self, path_filter: Option<ProjectPath>) {
-        let path_matcher = match path_filter {
-            Some(project_path) => match project_path.path.to_str() {
-                Some(path) => PathMatcher::new([path]).ok(),
-                None => None,
-            },
-            None => None,
+        if let Some(project_path) = path_filter
+            && let Some(path) = project_path.path.to_str()
+            && let Ok(path_matcher) = PathMatcher::new([path])
+        {
+            self.path_matcher = path_matcher;
         };
-
-        self.path_matcher = path_matcher;
     }
 
     pub fn cargo_diagnostics_sources(&self, cx: &App) -> Vec<ProjectPath> {
@@ -938,6 +952,7 @@ impl Item for ProjectDiagnosticsEditor {
             ProjectDiagnosticsEditor::new(
                 self.include_warnings,
                 self.path_matcher.clone(),
+                self.path_matcher_enabled,
                 self.project.clone(),
                 self.workspace.clone(),
                 window,
