@@ -1,12 +1,14 @@
 pub mod items;
 mod toolbar_controls;
 
+mod buffer_diagnostics;
 mod diagnostic_renderer;
 
 #[cfg(test)]
 mod diagnostics_tests;
 
 use anyhow::Result;
+use buffer_diagnostics::BufferDiagnosticsEditor;
 use collections::{BTreeSet, HashMap};
 use diagnostic_renderer::DiagnosticBlock;
 use editor::{
@@ -53,8 +55,6 @@ actions!(
     [
         /// Opens the project diagnostics view.
         Deploy,
-        /// Opens the project diagnostics view for the currently focused file.
-        DeployCurrentFile,
         /// Toggles the display of warning-level diagnostics.
         ToggleWarnings,
         /// Toggles automatic refresh of diagnostics.
@@ -69,6 +69,7 @@ impl Global for IncludeWarnings {}
 pub fn init(cx: &mut App) {
     editor::set_diagnostic_renderer(diagnostic_renderer::DiagnosticRenderer {}, cx);
     cx.observe_new(ProjectDiagnosticsEditor::register).detach();
+    cx.observe_new(BufferDiagnosticsEditor::register).detach();
 }
 
 pub(crate) struct ProjectDiagnosticsEditor {
@@ -180,13 +181,12 @@ impl Render for ProjectDiagnosticsEditor {
 }
 
 impl ProjectDiagnosticsEditor {
-    fn register(
+    pub fn register(
         workspace: &mut Workspace,
         _window: Option<&mut Window>,
         _: &mut Context<Workspace>,
     ) {
         workspace.register_action(Self::deploy);
-        workspace.register_action(Self::deploy_current_file);
     }
 
     fn new(
@@ -405,61 +405,6 @@ impl ProjectDiagnosticsEditor {
                     include_warnings,
                     Default::default(),
                     false,
-                    workspace.project().clone(),
-                    workspace_handle,
-                    window,
-                    cx,
-                )
-            });
-            workspace.add_item_to_active_pane(Box::new(diagnostics), None, true, window, cx);
-        }
-    }
-
-    fn deploy_current_file(
-        workspace: &mut Workspace,
-        _: &DeployCurrentFile,
-        window: &mut Window,
-        cx: &mut Context<Workspace>,
-    ) {
-        // Determine the currently opened path by grabbing the active editor and
-        // finding the project path for the buffer.
-        let path = workspace
-            .active_item_as::<Editor>(cx)
-            .map_or(None, |editor| editor.project_path(cx));
-
-        if let Some(existing) = workspace.item_of_type::<ProjectDiagnosticsEditor>(cx) {
-            let is_active = workspace
-                .active_item(cx)
-                .is_some_and(|item| item.item_id() == existing.item_id());
-
-            existing.update(cx, |diagnostics, cx| {
-                diagnostics.set_path_filter(path.clone());
-                diagnostics.set_path_matcher_enabled(true, window, cx);
-            });
-
-            workspace.activate_item(&existing, true, !is_active, window, cx);
-        } else {
-            let workspace_handle = cx.entity().downgrade();
-
-            let include_warnings = match cx.try_global::<IncludeWarnings>() {
-                Some(include_warnings) => include_warnings.0,
-                None => ProjectSettings::get_global(cx).diagnostics.include_warnings,
-            };
-
-            let path_matcher = if let Some(project_path) = path
-                && let Some(path_str) = project_path.path.to_str()
-                && let Ok(path_matcher) = PathMatcher::new([path_str])
-            {
-                path_matcher
-            } else {
-                PathMatcher::default()
-            };
-
-            let diagnostics = cx.new(|cx| {
-                ProjectDiagnosticsEditor::new(
-                    include_warnings,
-                    path_matcher,
-                    true,
                     workspace.project().clone(),
                     workspace_handle,
                     window,
@@ -864,18 +809,6 @@ impl ProjectDiagnosticsEditor {
         self.summary = match self.path_matcher_enabled {
             true => project.diagnostic_summary_for_paths(&self.path_matcher, false, cx),
             false => project.diagnostic_summary(false, cx),
-        };
-    }
-
-    fn set_path_filter(&mut self, path_filter: Option<ProjectPath>) {
-        if let Some(project_path) = path_filter
-            && let Some(path) = project_path.path.to_str()
-            && let Ok(path_matcher) = PathMatcher::new([path])
-        {
-            self.path_matcher = path_matcher;
-            // TODO: Do we need to udpdate `self.summary` after updating this?
-            // When toggling between enabled and disabled, the number seems to
-            // be stuck after all files are shown.
         };
     }
 
