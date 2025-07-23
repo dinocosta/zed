@@ -1,10 +1,3 @@
-// use anyhow::Result;
-// use editor::Editor;
-// use editor::MultiBuffer;
-// use editor::display_map::CustomBockId;
-// use gpui::Entity;
-// use gpui::Task;
-// use gpui::WeakEntity;
 use editor::Editor;
 use editor::EditorEvent;
 use gpui::AnyElement;
@@ -23,18 +16,18 @@ use gpui::Styled;
 use gpui::Window;
 use gpui::actions;
 use gpui::div;
+use project::DiagnosticSummary;
 use project::ProjectPath;
+use ui::Icon;
+use ui::IconName;
 use ui::Label;
 use ui::h_flex;
+use ui::prelude::*;
 use util::paths::PathExt;
 use workspace::ItemHandle;
 use workspace::Workspace;
 use workspace::item::Item;
 use workspace::item::TabContentParams;
-// use language::DiagnosticEntry;
-// use project::Project;
-// use text::Anchor;
-// use text::BufferId;
 
 actions!(
     diagnostics,
@@ -51,6 +44,9 @@ pub(crate) struct BufferDiagnosticsEditor {
     focus_handle: FocusHandle,
     /// The path for which the editor is displaying diagnostics for.
     project_path: ProjectPath,
+    /// Summary of the number of warnings and errors for the path. Used to
+    /// display the number of warnings and errors in the tab's content.
+    summary: DiagnosticSummary,
 }
 
 impl BufferDiagnosticsEditor {
@@ -58,10 +54,16 @@ impl BufferDiagnosticsEditor {
     /// displayed by adding it to a pane.
     fn new(project_path: ProjectPath, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
+        // TODO: Update this to eventually remove the hard-coded values.
+        let summary = DiagnosticSummary {
+            warning_count: 2,
+            error_count: 2,
+        };
 
         Self {
             focus_handle,
             project_path,
+            summary,
         }
     }
 
@@ -116,10 +118,37 @@ impl Item for BufferDiagnosticsEditor {
     type Event = EditorEvent;
 
     // Builds the content to be displayed in the tab.
-    fn tab_content(&self, _params: TabContentParams, _window: &Window, _app: &App) -> AnyElement {
+    fn tab_content(&self, params: TabContentParams, _window: &Window, _app: &App) -> AnyElement {
+        let error_count = self.summary.error_count;
+        let warning_count = self.summary.warning_count;
+        let label = Label::new(self.project_path.path.to_sanitized_string());
+
         h_flex()
             .gap_1()
-            .child(Label::new(self.project_path.path.to_sanitized_string()))
+            .child(label.color(params.text_color()))
+            .when(error_count == 0 && warning_count == 0, |parent| {
+                parent.child(
+                    h_flex()
+                        .gap_1()
+                        .child(Icon::new(IconName::Check).color(Color::Success)),
+                )
+            })
+            .when(error_count > 0, |parent| {
+                parent.child(
+                    h_flex()
+                        .gap_1()
+                        .child(Icon::new(IconName::XCircle).color(Color::Error))
+                        .child(Label::new(error_count.to_string()).color(params.text_color())),
+                )
+            })
+            .when(warning_count > 0, |parent| {
+                parent.child(
+                    h_flex()
+                        .gap_1()
+                        .child(Icon::new(IconName::Warning).color(Color::Warning))
+                        .child(Label::new(warning_count.to_string()).color(params.text_color())),
+                )
+            })
             .into_any_element()
     }
 
