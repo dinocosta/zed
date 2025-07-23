@@ -5,6 +5,7 @@
 // use gpui::Entity;
 // use gpui::Task;
 // use gpui::WeakEntity;
+use editor::Editor;
 use editor::EditorEvent;
 use gpui::AnyElement;
 use gpui::App;
@@ -22,13 +23,15 @@ use gpui::Styled;
 use gpui::Window;
 use gpui::actions;
 use gpui::div;
+use project::ProjectPath;
 use ui::Label;
 use ui::h_flex;
+use util::paths::PathExt;
+use workspace::ItemHandle;
 use workspace::Workspace;
 use workspace::item::Item;
 use workspace::item::TabContentParams;
 // use language::DiagnosticEntry;
-// use project::DiagnosticSummary;
 // use project::Project;
 // use text::Anchor;
 // use text::BufferId;
@@ -46,15 +49,20 @@ actions!(
 /// where diagnostics are available are displayed.
 pub(crate) struct BufferDiagnosticsEditor {
     focus_handle: FocusHandle,
+    /// The path for which the editor is displaying diagnostics for.
+    project_path: ProjectPath,
 }
 
 impl BufferDiagnosticsEditor {
     /// Creates new instance of the `BufferDiagnosticsEditor` which can then be
     /// displayed by adding it to a pane.
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(project_path: ProjectPath, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
 
-        Self { focus_handle }
+        Self {
+            focus_handle,
+            project_path,
+        }
     }
 
     fn deploy(
@@ -63,8 +71,28 @@ impl BufferDiagnosticsEditor {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        let item = cx.new(|cx| Self::new(cx));
-        workspace.add_item_to_active_pane(Box::new(item), None, true, window, cx);
+        // Determine the currently opened path by finding the active editor and
+        // finding the project path for the buffer.
+        // If there's no active editor with a project path, avoiding deploying
+        // the buffer diagnostics view.
+        if let Some(project_path) = workspace
+            .active_item_as::<Editor>(cx)
+            .map_or(None, |editor| editor.project_path(cx))
+        {
+            // Check if there's already a `BufferDiagnosticsEditor` tab for this
+            // same path, and if so, focus on that one instead of creating a new
+            // one.
+            let existing_editor = workspace
+                .items_of_type::<BufferDiagnosticsEditor>(cx)
+                .find(|editor| editor.read(cx).project_path == project_path);
+
+            if let Some(editor) = existing_editor {
+                workspace.activate_item(&editor, true, true, window, cx);
+            } else {
+                let item = cx.new(|cx| Self::new(project_path, cx));
+                workspace.add_item_to_active_pane(Box::new(item), None, true, window, cx);
+            }
+        }
     }
 
     pub fn register(
@@ -91,13 +119,22 @@ impl Item for BufferDiagnosticsEditor {
     fn tab_content(&self, _params: TabContentParams, _window: &Window, _app: &App) -> AnyElement {
         h_flex()
             .gap_1()
-            .child(Label::new("Buffer Diagnostics"))
+            .child(Label::new(self.project_path.path.to_sanitized_string()))
             .into_any_element()
     }
 
-    // Builds the content to be displayed in the tab.
     fn tab_content_text(&self, _detail: usize, _app: &App) -> SharedString {
         "Buffer Diagnostics".into()
+    }
+
+    fn tab_tooltip_text(&self, _: &App) -> Option<SharedString> {
+        Some(
+            format!(
+                "Buffer Diagnostics - {}",
+                self.project_path.path.to_sanitized_string()
+            )
+            .into(),
+        )
     }
 }
 
