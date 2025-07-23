@@ -169,9 +169,30 @@ impl Item for BufferDiagnosticsEditor {
 
 impl Render for BufferDiagnosticsEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .key_context("Diagnostics")
-            .track_focus(&self.focus_handle(cx))
-            .size_full()
+        let error_count = &self.summary.error_count;
+        let warning_count = &self.summary.warning_count;
+
+        // No excerpts to be displayed.
+        if error_count + warning_count == 0 {
+            let label = format!(
+                "No problems in {}",
+                self.project_path.path.to_sanitized_string()
+            );
+
+            v_flex()
+                .key_context("EmptyPane")
+                .size_full()
+                .gap_1()
+                .justify_center()
+                .items_center()
+                .text_center()
+                .bg(cx.theme().colors().editor_background)
+                .child(Label::new(label).color(Color::Muted))
+        } else {
+            div()
+                .key_context("Diagnostics")
+                .track_focus(&self.focus_handle(cx))
+                .size_full()
+        }
     }
 }
