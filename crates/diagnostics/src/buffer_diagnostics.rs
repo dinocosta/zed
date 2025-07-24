@@ -1,9 +1,11 @@
 use editor::Editor;
 use editor::EditorEvent;
+use editor::MultiBuffer;
 use gpui::AnyElement;
 use gpui::App;
 use gpui::AppContext;
 use gpui::Context;
+use gpui::Entity;
 use gpui::EventEmitter;
 use gpui::FocusHandle;
 use gpui::Focusable;
@@ -17,7 +19,9 @@ use gpui::Window;
 use gpui::actions;
 use gpui::div;
 use project::DiagnosticSummary;
+use project::Project;
 use project::ProjectPath;
+use project::project_settings::DiagnosticSeverity;
 use ui::Icon;
 use ui::IconName;
 use ui::Label;
@@ -42,6 +46,7 @@ actions!(
 /// where diagnostics are available are displayed.
 pub(crate) struct BufferDiagnosticsEditor {
     focus_handle: FocusHandle,
+    editor: Entity<Editor>,
     /// The path for which the editor is displaying diagnostics for.
     project_path: ProjectPath,
     /// Summary of the number of warnings and errors for the path. Used to
@@ -52,7 +57,12 @@ pub(crate) struct BufferDiagnosticsEditor {
 impl BufferDiagnosticsEditor {
     /// Creates new instance of the `BufferDiagnosticsEditor` which can then be
     /// displayed by adding it to a pane.
-    fn new(project_path: ProjectPath, cx: &mut Context<Self>) -> Self {
+    fn new(
+        project_path: ProjectPath,
+        project_handle: Entity<Project>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
         // TODO: Update this to eventually remove the hard-coded values.
         let summary = DiagnosticSummary {
@@ -60,8 +70,20 @@ impl BufferDiagnosticsEditor {
             error_count: 2,
         };
 
+        let excerpts = cx.new(|cx| MultiBuffer::new(project_handle.read(cx).capability()));
+        let editor = cx.new(|cx| {
+            let mut editor =
+                Editor::for_multibuffer(excerpts.clone(), Some(project_handle.clone()), window, cx);
+            editor.set_vertical_scroll_margin(5, cx);
+            editor.disable_inline_diagnostics();
+            editor.set_max_diagnostics_severity(DiagnosticSeverity::Warning, cx);
+            editor.set_all_diagnostics_active(cx);
+            editor
+        });
+
         Self {
             focus_handle,
+            editor,
             project_path,
             summary,
         }
@@ -91,7 +113,8 @@ impl BufferDiagnosticsEditor {
             if let Some(editor) = existing_editor {
                 workspace.activate_item(&editor, true, true, window, cx);
             } else {
-                let item = cx.new(|cx| Self::new(project_path, cx));
+                let item =
+                    cx.new(|cx| Self::new(project_path, workspace.project().clone(), window, cx));
                 workspace.add_item_to_active_pane(Box::new(item), None, true, window, cx);
             }
         }
@@ -189,10 +212,7 @@ impl Render for BufferDiagnosticsEditor {
                 .bg(cx.theme().colors().editor_background)
                 .child(Label::new(label).color(Color::Muted))
         } else {
-            div()
-                .key_context("Diagnostics")
-                .track_focus(&self.focus_handle(cx))
-                .size_full()
+            div().size_full().child(self.editor.clone())
         }
     }
 }
