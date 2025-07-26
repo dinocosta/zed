@@ -11,6 +11,7 @@ use anyhow::Result;
 use buffer_diagnostics::BufferDiagnosticsEditor;
 use collections::{BTreeSet, HashMap};
 use diagnostic_renderer::DiagnosticBlock;
+use diagnostic_renderer::DiagnosticsEditor;
 use editor::{
     DEFAULT_MULTIBUFFER_CONTEXT, Editor, EditorEvent, ExcerptRange, MultiBuffer, PathKey,
     display_map::{BlockPlacement, BlockProperties, BlockStyle, CustomBlockId},
@@ -38,7 +39,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use text::{BufferId, OffsetRangeExt};
+use text::{Anchor, BufferId, OffsetRangeExt};
 use theme::ActiveTheme;
 pub use toolbar_controls::ToolbarControls;
 use ui::{Icon, IconName, Label, h_flex, prelude::*};
@@ -96,6 +97,7 @@ pub(crate) struct ProjectDiagnosticsEditor {
     _subscription: Subscription,
 }
 
+#[derive(Default)]
 struct CargoDiagnosticsFetchState {
     fetch_task: Option<Task<()>>,
     cancel_task: Option<Task<()>>,
@@ -105,6 +107,7 @@ struct CargoDiagnosticsFetchState {
 impl EventEmitter<EditorEvent> for ProjectDiagnosticsEditor {}
 
 const DIAGNOSTICS_UPDATE_DELAY: Duration = Duration::from_millis(50);
+const DIAGNOSTICS_SUMMARY_UPDATE_DELAY: Duration = Duration::from_millis(30);
 
 impl Render for ProjectDiagnosticsEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -214,7 +217,7 @@ impl ProjectDiagnosticsEditor {
                     this.paths_to_update.insert(path.clone());
                     this.diagnostic_summary_update = cx.spawn(async move |this, cx| {
                         cx.background_executor()
-                            .timer(Duration::from_millis(30))
+                            .timer(DIAGNOSTICS_SUMMARY_UPDATE_DELAY)
                             .await;
                         this.update(cx, |this, cx| {
                             this.update_diagnostic_summary(cx);
@@ -653,7 +656,7 @@ impl ProjectDiagnosticsEditor {
                         diagnostic: entry.diagnostic,
                     })
             }
-            let mut blocks: Vec<DiagnosticBlock> = Vec::new();
+            let mut blocks: Vec<DiagnosticBlock<Self>> = Vec::new();
 
             for (_, group) in grouped {
                 let group_severity = group.iter().map(|d| d.diagnostic.severity).min();
@@ -824,6 +827,7 @@ impl ProjectDiagnosticsEditor {
             .read(cx)
             .worktrees(cx)
             .filter_map(|worktree| {
+                // TODO: Can this ignored variable be removed?!
                 let _cargo_toml_entry = worktree.read(cx).entry_for_path("Cargo.toml")?;
                 let rust_file_entry = worktree.read(cx).entries(false, 0).find(|entry| {
                     entry
@@ -835,6 +839,19 @@ impl ProjectDiagnosticsEditor {
                 self.project.read(cx).path_for_entry(rust_file_entry.id, cx)
             })
             .collect()
+    }
+}
+
+impl DiagnosticsEditor for ProjectDiagnosticsEditor {
+    fn get_diagnostics_for_buffer(
+        &self,
+        buffer_id: BufferId,
+        _cx: &App,
+    ) -> Vec<DiagnosticEntry<Anchor>> {
+        self.diagnostics
+            .get(&buffer_id)
+            .cloned()
+            .unwrap_or_default()
     }
 }
 

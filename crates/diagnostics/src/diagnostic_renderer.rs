@@ -18,17 +18,37 @@ use ui::{
 };
 use util::maybe;
 
-use crate::ProjectDiagnosticsEditor;
+pub trait DiagnosticsEditor: 'static {
+    fn get_diagnostics_for_buffer(
+        &self,
+        buffer_id: BufferId,
+        cx: &App,
+    ) -> Vec<DiagnosticEntry<text::Anchor>>;
+}
+
+/// Represents the absence of a diagnostics editor when determining the
+/// diagnostics block for a group.
+pub struct NoDiagnosticsEditor;
+
+impl DiagnosticsEditor for NoDiagnosticsEditor {
+    fn get_diagnostics_for_buffer(
+        &self,
+        _buffer_id: BufferId,
+        _cx: &App,
+    ) -> Vec<DiagnosticEntry<text::Anchor>> {
+        vec![]
+    }
+}
 
 pub struct DiagnosticRenderer;
 
 impl DiagnosticRenderer {
-    pub fn diagnostic_blocks_for_group(
+    pub fn diagnostic_blocks_for_group<T: DiagnosticsEditor>(
         diagnostic_group: Vec<DiagnosticEntry<Point>>,
         buffer_id: BufferId,
-        diagnostics_editor: Option<WeakEntity<ProjectDiagnosticsEditor>>,
+        diagnostics_editor: Option<WeakEntity<T>>,
         cx: &mut App,
-    ) -> Vec<DiagnosticBlock> {
+    ) -> Vec<DiagnosticBlock<T>> {
         let Some(primary_ix) = diagnostic_group
             .iter()
             .position(|d| d.diagnostic.is_primary)
@@ -129,7 +149,13 @@ impl editor::DiagnosticRenderer for DiagnosticRenderer {
         editor: WeakEntity<Editor>,
         cx: &mut App,
     ) -> Vec<BlockProperties<Anchor>> {
-        let blocks = Self::diagnostic_blocks_for_group(diagnostic_group, buffer_id, None, cx);
+        let blocks = Self::diagnostic_blocks_for_group::<NoDiagnosticsEditor>(
+            diagnostic_group,
+            buffer_id,
+            None,
+            cx,
+        );
+
         blocks
             .into_iter()
             .map(|block| {
@@ -156,7 +182,12 @@ impl editor::DiagnosticRenderer for DiagnosticRenderer {
         buffer_id: BufferId,
         cx: &mut App,
     ) -> Option<Entity<Markdown>> {
-        let blocks = Self::diagnostic_blocks_for_group(diagnostic_group, buffer_id, None, cx);
+        let blocks = Self::diagnostic_blocks_for_group::<NoDiagnosticsEditor>(
+            diagnostic_group,
+            buffer_id,
+            None,
+            cx,
+        );
         blocks.into_iter().find_map(|block| {
             if block.initial_range == range {
                 Some(block.markdown)
@@ -173,19 +204,19 @@ impl editor::DiagnosticRenderer for DiagnosticRenderer {
         window: &mut Window,
         cx: &mut Context<Editor>,
     ) {
-        DiagnosticBlock::open_link(editor, &None, link, window, cx);
+        DiagnosticBlock::<NoDiagnosticsEditor>::open_link(editor, &None, link, window, cx);
     }
 }
 
 #[derive(Clone)]
-pub(crate) struct DiagnosticBlock {
+pub(crate) struct DiagnosticBlock<T: DiagnosticsEditor> {
     pub(crate) initial_range: Range<Point>,
     pub(crate) severity: DiagnosticSeverity,
     pub(crate) markdown: Entity<Markdown>,
-    pub(crate) diagnostics_editor: Option<WeakEntity<ProjectDiagnosticsEditor>>,
+    pub(crate) diagnostics_editor: Option<WeakEntity<T>>,
 }
 
-impl DiagnosticBlock {
+impl<T: DiagnosticsEditor> DiagnosticBlock<T> {
     pub fn render_block(&self, editor: WeakEntity<Editor>, bcx: &BlockContext) -> AnyElement {
         let cx = &bcx.app;
         let status_colors = bcx.app.theme().status();
@@ -233,7 +264,7 @@ impl DiagnosticBlock {
 
     pub fn open_link(
         editor: &mut Editor,
-        diagnostics_editor: &Option<WeakEntity<ProjectDiagnosticsEditor>>,
+        diagnostics_editor: &Option<WeakEntity<T>>,
         link: SharedString,
         window: &mut Window,
         cx: &mut Context<Editor>,
@@ -256,10 +287,7 @@ impl DiagnosticBlock {
             if let Some(diagnostic) = diagnostics_editor
                 .read_with(cx, |diagnostics, _| {
                     diagnostics
-                        .diagnostics
-                        .get(&buffer_id)
-                        .cloned()
-                        .unwrap_or_default()
+                        .get_diagnostics_for_buffer(buffer_id, cx)
                         .into_iter()
                         .filter(|d| d.diagnostic.group_id == group_id)
                         .nth(ix)
@@ -299,9 +327,9 @@ impl DiagnosticBlock {
         };
     }
 
-    fn jump_to<T: ToOffset>(
+    fn jump_to<I: ToOffset>(
         editor: &mut Editor,
-        range: Range<T>,
+        range: Range<I>,
         window: &mut Window,
         cx: &mut Context<Editor>,
     ) {
