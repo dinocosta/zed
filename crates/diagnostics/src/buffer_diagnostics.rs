@@ -1,6 +1,19 @@
+use crate::CargoDiagnosticsFetchState;
+use crate::DIAGNOSTICS_SUMMARY_UPDATE_DELAY;
+use crate::DIAGNOSTICS_UPDATE_DELAY;
+use crate::context_range_for_entry;
+use crate::diagnostic_renderer::DiagnosticBlock;
+use crate::diagnostic_renderer::DiagnosticRenderer;
+use crate::diagnostic_renderer::DiagnosticsEditor;
+use anyhow::Result;
+use collections::HashMap;
+use editor::DEFAULT_MULTIBUFFER_CONTEXT;
 use editor::Editor;
 use editor::EditorEvent;
+use editor::ExcerptRange;
 use editor::MultiBuffer;
+use editor::PathKey;
+use futures::future::join_all;
 use gpui::AnyElement;
 use gpui::App;
 use gpui::AppContext;
@@ -15,19 +28,36 @@ use gpui::ParentElement;
 use gpui::Render;
 use gpui::SharedString;
 use gpui::Styled;
+use gpui::Subscription;
+use gpui::Task;
 use gpui::Window;
 use gpui::actions;
 use gpui::div;
+use language::Buffer;
+use language::BufferId;
+use language::DiagnosticEntry;
+use language::Point;
 use project::DiagnosticSummary;
+use project::Event;
 use project::Project;
 use project::ProjectPath;
+use project::lsp_store::rust_analyzer_ext::run_flycheck;
 use project::project_settings::DiagnosticSeverity;
+use project::project_settings::ProjectSettings;
+use settings::Settings;
+use std::cmp::Ordering;
+use std::sync::Arc;
+use text::Anchor;
+use text::BufferSnapshot;
+use text::OffsetRangeExt;
 use ui::Icon;
 use ui::IconName;
 use ui::Label;
 use ui::h_flex;
 use ui::prelude::*;
+use util::ResultExt;
 use util::paths::PathExt;
+use util::paths::PathMatcher;
 use workspace::ItemHandle;
 use workspace::Workspace;
 use workspace::item::Item;
@@ -45,13 +75,33 @@ actions!(
 /// with diagnostics for a single buffer, as only the excerpts of the buffer
 /// where diagnostics are available are displayed.
 pub(crate) struct BufferDiagnosticsEditor {
+    project: Entity<Project>,
     focus_handle: FocusHandle,
     editor: Entity<Editor>,
+    /// The current diagnostic entries in the `BufferDiagnosticsEditor`. Used to
+    /// allow quick comparison of updated diagnostics, to confirm if anything
+    /// has changed.
+    diagnostics: Vec<DiagnosticEntry<Anchor>>,
+    /// Multibuffer to contain all excerpts that contain diagnostics, which are
+    /// to be rendered in the editor.
+    multibuffer: Entity<MultiBuffer>,
     /// The path for which the editor is displaying diagnostics for.
     project_path: ProjectPath,
     /// Summary of the number of warnings and errors for the path. Used to
     /// display the number of warnings and errors in the tab's content.
     summary: DiagnosticSummary,
+    /// Keeps track of whether there's a background task already running to
+    /// update the excerpts, in order to avoid firing multiple tasks for this purpose.
+    update_excerpts_task: Option<Task<Result<()>>>,
+    /// Keeps track of the task responsible for updating the
+    /// `BufferDiagnosticsEditor`'s diagnostic summary.
+    diagnostic_summary_task: Task<()>,
+    /// Tracks the state of fetching cargo diagnostics, including any running
+    /// fetch tasks and the diagnostic sources being processed.
+    cargo_diagnostics_fetch: CargoDiagnosticsFetchState,
+    /// TODO: Why do we need to keep the subscription in the struct? If we
+    /// don't, it gets discarded and we'll stop receiving events?
+    _subscription: Subscription,
 }
 
 impl BufferDiagnosticsEditor {
@@ -63,17 +113,93 @@ impl BufferDiagnosticsEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let focus_handle = cx.focus_handle();
-        // TODO: Update this to eventually remove the hard-coded values.
-        let summary = DiagnosticSummary {
-            warning_count: 2,
-            error_count: 2,
-        };
+        // Subscribe to project events related to diagnostics so the `BufferDiagnosticsEditor` can update its state accordingly.
+        let project_event_subscription = cx.subscribe_in(
+            &project_handle,
+            window,
+            |buffer_diagnostics_editor, _project, event, window, cx| match event {
+                Event::DiskBasedDiagnosticsStarted { .. } => {
+                    log::debug!("disk based diagnostics started");
+                    cx.notify();
+                }
+                Event::DiskBasedDiagnosticsFinished { language_server_id } => {
+                    log::debug!("disk based diagnostics finished for server {language_server_id}");
+                    buffer_diagnostics_editor.update_all_excerpts(window, cx);
+                }
+                Event::DiagnosticsUpdated {
+                    path,
+                    language_server_id,
+                } => {
+                    // When diagnostics have been updated, the
+                    // `BufferDiagnosticsEditor` should update its state only if
+                    // the path matches its `project_path`, otherwise the event should be ignored.
+                    if *path == buffer_diagnostics_editor.project_path {
+                        // Start a task to update the diagnostic summary.
+                        buffer_diagnostics_editor.diagnostic_summary_task =
+                            cx.spawn(async move |buffer_diagnostics_editor, cx| {
+                                cx.background_executor()
+                                    .timer(DIAGNOSTICS_SUMMARY_UPDATE_DELAY)
+                                    .await;
 
-        let excerpts = cx.new(|cx| MultiBuffer::new(project_handle.read(cx).capability()));
+                                buffer_diagnostics_editor
+                                    .update(cx, |buffer_diagnostics_editor, cx| {
+                                        buffer_diagnostics_editor.update_diagnostic_summary(cx);
+                                    })
+                                    .log_err();
+                            });
+
+                            // TODO: Why are we emitting this event? Because the
+                            // tab's title can change when the summary is
+                            // updated?
+                            cx.emit(EditorEvent::TitleChanged);
+
+                        if buffer_diagnostics_editor.editor.focus_handle(cx).contains_focused(window, cx) || buffer_diagnostics_editor.focus_handle.contains_focused(window, cx) {
+                            log::debug!("diagnostics updated for server {language_server_id}, path {path:?}. recording change");
+                        } else {
+                            log::debug!("diagnostics updated for server {language_server_id}, path {path:?}. updating excerpts");
+                            buffer_diagnostics_editor.update_all_excerpts(window, cx);
+                        }
+                    }
+                }
+                _ => {}
+            },
+        );
+
+        let project = project_handle.clone();
+        let focus_handle = cx.focus_handle();
+
+        cx.on_focus_in(
+            &focus_handle,
+            window,
+            |buffer_diagnostics_editor, window, cx| buffer_diagnostics_editor.focus_in(window, cx),
+        )
+        .detach();
+
+        cx.on_focus_out(
+            &focus_handle,
+            window,
+            |buffer_diagnostics_editor, _event, window, cx| {
+                buffer_diagnostics_editor.focus_out(window, cx)
+            },
+        )
+        .detach();
+
+        // TODO: Update this to eventually remove the hard-coded values.
+        // TODO: Leverage `project.diagnostic_summary_for_path(path, false, cx)`
+        let summary = project_handle.read(cx).diagnostic_summary_for_paths(
+            &PathMatcher::new([project_path.path.to_sanitized_string()]).unwrap(),
+            false,
+            cx,
+        );
+
+        let multibuffer = cx.new(|cx| MultiBuffer::new(project_handle.read(cx).capability()));
         let editor = cx.new(|cx| {
-            let mut editor =
-                Editor::for_multibuffer(excerpts.clone(), Some(project_handle.clone()), window, cx);
+            let mut editor = Editor::for_multibuffer(
+                multibuffer.clone(),
+                Some(project_handle.clone()),
+                window,
+                cx,
+            );
             editor.set_vertical_scroll_margin(5, cx);
             editor.disable_inline_diagnostics();
             editor.set_max_diagnostics_severity(DiagnosticSeverity::Warning, cx);
@@ -81,12 +207,26 @@ impl BufferDiagnosticsEditor {
             editor
         });
 
-        Self {
+        let diagnostics = vec![];
+        let update_excerpts_task = None;
+        let diagnostic_summary_task = Task::ready(());
+        let cargo_diagnostics_fetch: CargoDiagnosticsFetchState = Default::default();
+        let mut buffer_diagnostics_editor = Self {
+            project,
             focus_handle,
             editor,
+            diagnostics,
+            multibuffer,
             project_path,
             summary,
-        }
+            update_excerpts_task,
+            diagnostic_summary_task,
+            cargo_diagnostics_fetch,
+            _subscription: project_event_subscription,
+        };
+
+        buffer_diagnostics_editor.update_all_diagnostics(true, window, cx);
+        buffer_diagnostics_editor
     }
 
     fn deploy(
@@ -126,6 +266,377 @@ impl BufferDiagnosticsEditor {
         _: &mut Context<Workspace>,
     ) {
         workspace.register_action(Self::deploy);
+    }
+
+    fn update_all_diagnostics(
+        &mut self,
+        first_launch: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cargo_diagnostics_sources = self.cargo_diagnostics_sources(cx);
+
+        if cargo_diagnostics_sources.is_empty() || (first_launch && !self.summary.is_empty()) {
+            self.update_all_excerpts(window, cx);
+        } else {
+            self.fetch_cargo_diagnostics(Arc::new(cargo_diagnostics_sources), cx);
+        }
+    }
+
+    fn update_diagnostic_summary(&mut self, cx: &mut Context<Self>) {
+        let project = self.project.read(cx);
+
+        // TODO: Update this to deal only with the `self.project_path` path and not all diagnostics.
+        self.summary = project.diagnostic_summary_for_paths(
+            &PathMatcher::new([self.project_path.path.to_sanitized_string()]).unwrap(),
+            false,
+            cx,
+        );
+    }
+
+    // TODO: Why do we need this? Is it specific for Rust projects? Can it be
+    // moved to the `diagnostics` module so it can be reused by both
+    // `BufferDiagnosticsEditor` and `BufferDiagnosticsEditor`?
+    fn cargo_diagnostics_sources(&self, cx: &App) -> Vec<ProjectPath> {
+        let fetch_cargo_diagnostics = ProjectSettings::get_global(cx)
+            .diagnostics
+            .fetch_cargo_diagnostics();
+
+        if !fetch_cargo_diagnostics {
+            return Vec::new();
+        }
+
+        self.project
+            .read(cx)
+            .worktrees(cx)
+            .filter_map(|worktree| {
+                let rust_file_entry = worktree.read(cx).entries(false, 0).find(|entry| {
+                    entry
+                        .path
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        == Some("rs")
+                })?;
+
+                self.project.read(cx).path_for_entry(rust_file_entry.id, cx)
+            })
+            .collect()
+    }
+
+    fn fetch_cargo_diagnostics(
+        &mut self,
+        diagnostics_sources: Arc<Vec<ProjectPath>>,
+        cx: &mut Context<Self>,
+    ) {
+        let project = self.project.clone();
+        self.cargo_diagnostics_fetch.cancel_task = None;
+        self.cargo_diagnostics_fetch.fetch_task = None;
+        self.cargo_diagnostics_fetch.diagnostic_sources = diagnostics_sources.clone();
+        if self.cargo_diagnostics_fetch.diagnostic_sources.is_empty() {
+            return;
+        }
+
+        self.cargo_diagnostics_fetch.fetch_task = Some(cx.spawn(async move |editor, cx| {
+            let mut fetch_tasks = Vec::new();
+            for buffer_path in diagnostics_sources.iter().cloned() {
+                if cx
+                    .update(|cx| {
+                        fetch_tasks.push(run_flycheck(project.clone(), buffer_path, cx));
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+
+            let _ = join_all(fetch_tasks).await;
+            editor
+                .update(cx, |editor, _| {
+                    editor.cargo_diagnostics_fetch.fetch_task = None;
+                })
+                .ok();
+        }));
+    }
+
+    /// Enqueue an update of all excerpts. Updates all paths that either have
+    /// diagnostics or are currently present in this view to ensure that new
+    /// diagnostics are added and that excerpts that are shown but no longer
+    /// have diagnostics are removed from the editor.
+    /// TODO: Update this to only deal with the active file path, we don't need
+    /// to iterate over all paths, as this view is meant to only deal with a
+    /// single file.
+    /// TODO: Update this to behave like the regular `ProjectDiagnosticsEditor`
+    /// and run this in a background task with `update_stale_excerpts`.
+    fn update_all_excerpts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // If the background task to update the excerpts is already running,
+        // stop execution to let the other instance finish.
+        if self.update_excerpts_task.is_some() {
+            return;
+        }
+
+        let project_handle = self.project.clone();
+        let project_path = self.project_path.clone();
+
+        self.update_excerpts_task = Some(cx.spawn_in(
+            window,
+            async move |buffer_diagnostics_editor, cx| {
+                cx.background_executor()
+                    .timer(DIAGNOSTICS_UPDATE_DELAY)
+                    .await;
+
+                if let Some(buffer) = project_handle
+                    .update(cx, |project, cx| {
+                        project.open_buffer(project_path.clone(), cx)
+                    })?
+                    .await
+                    .log_err()
+                {
+                    buffer_diagnostics_editor
+                        .update_in(cx, |buffer_diagnostics_editor, window, cx| {
+                            // Reset the `excerpts_tasks` to `None` so another instance can run.
+                            buffer_diagnostics_editor.update_excerpts_task = None;
+                            buffer_diagnostics_editor.update_excerpts(buffer, window, cx)
+                        })?
+                        .await?;
+                }
+
+                Ok(())
+            },
+        ));
+    }
+
+    /// Updates the excerpts in the `BufferDiagnosticsEditor` for a single
+    /// buffer.
+    fn update_excerpts(
+        &mut self,
+        buffer: Entity<Buffer>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let was_empty = self.multibuffer.read(cx).is_empty();
+        let buffer_snapshot = buffer.read(cx).snapshot();
+        let buffer_snapshot_max = buffer_snapshot.max_point();
+
+        cx.spawn_in(window, async move |buffer_diagnostics_editor, mut cx| {
+            // Fetch the diagnostics for the whole of the buffer
+            // (`Point::zero()..buffer_snapshot.max_point()`) so we can confirm
+            // if the diagnostics changed, if it didn't, early return as there's
+            // nothing to update.
+            let diagnostics = buffer_snapshot
+                .diagnostics_in_range::<_, Anchor>(Point::zero()..buffer_snapshot_max, false)
+                .collect::<Vec<_>>();
+
+            let unchanged =
+                buffer_diagnostics_editor.update(cx, |buffer_diagnostics_editor, _cx| {
+                    if buffer_diagnostics_editor
+                        .diagnostics_are_unchanged(&diagnostics, &buffer_snapshot)
+                    {
+                        return true;
+                    }
+
+                    buffer_diagnostics_editor.set_diagnostics(&diagnostics);
+                    return false;
+                })?;
+
+            if unchanged {
+                return Ok(());
+            }
+
+            // Mapping between the Group ID and a vector of DiagnosticEntry.
+            let mut grouped: HashMap<usize, Vec<_>> = HashMap::default();
+            for entry in diagnostics {
+                grouped
+                    .entry(entry.diagnostic.group_id)
+                    .or_default()
+                    .push(DiagnosticEntry {
+                        range: entry.range.to_point(&buffer_snapshot),
+                        diagnostic: entry.diagnostic,
+                    })
+            }
+
+            let mut blocks: Vec<DiagnosticBlock<BufferDiagnosticsEditor>> = Vec::new();
+            for (_, group) in grouped {
+                // TODO: Actually implement this, as
+                // `diagnostic_blocks_for_group` expects the second argument to
+                // be `ProjectDiagnosticsEditor`, so it'll need to be refactored
+                // to also work with `BufferDiagnosticsEditor`.
+                let diagnostic_blocks = cx.update(|_window, cx| {
+                    DiagnosticRenderer::diagnostic_blocks_for_group(
+                        group,
+                        buffer_snapshot.remote_id(),
+                        Some(buffer_diagnostics_editor.clone()),
+                        cx,
+                    )
+                })?;
+
+                // TODO: What's happening here? Is there a way to write this in
+                // a cleaner way?
+                for diagnostic_block in diagnostic_blocks {
+                    let index = blocks
+                        .binary_search_by(|probe| {
+                            probe
+                                .initial_range
+                                .start
+                                .cmp(&diagnostic_block.initial_range.start)
+                                .then(
+                                    probe
+                                        .initial_range
+                                        .end
+                                        .cmp(&diagnostic_block.initial_range.end),
+                                )
+                                .then(Ordering::Greater)
+                        })
+                        .unwrap_or_else(|index| index);
+
+                    blocks.insert(index, diagnostic_block);
+                }
+            }
+
+            // Build the excerpt ranges for this specific buffer's diagnostics,
+            // so those excerpts can later be used to update the excerpts shown
+            // in the editor.
+            // This is done by iterating over the list of diagnostic blocks and
+            // determine what range does the diagnostic block span.
+            let mut excerpt_ranges: Vec<ExcerptRange<Point>> = Vec::new();
+
+            for diagnostic_block in blocks.iter() {
+                let excerpt_range = context_range_for_entry(
+                    diagnostic_block.initial_range.clone(),
+                    DEFAULT_MULTIBUFFER_CONTEXT,
+                    buffer_snapshot.clone(),
+                    &mut cx,
+                )
+                .await;
+
+                // TODO: Do we actually need to do this if we just did it for
+                // the diagnostic blocks? Shouldn't this already be sorted?
+                let index = excerpt_ranges
+                    .binary_search_by(|probe| {
+                        probe
+                            .context
+                            .start
+                            .cmp(&excerpt_range.start)
+                            .then(probe.context.end.cmp(&excerpt_range.end))
+                            .then(
+                                probe
+                                    .primary
+                                    .start
+                                    .cmp(&diagnostic_block.initial_range.start),
+                            )
+                            .then(probe.primary.end.cmp(&diagnostic_block.initial_range.end))
+                            .then(Ordering::Greater)
+                    })
+                    .unwrap_or_else(|index| index);
+
+                excerpt_ranges.insert(
+                    index,
+                    ExcerptRange {
+                        context: excerpt_range,
+                        primary: diagnostic_block.initial_range.clone(),
+                    },
+                )
+            }
+
+            // Finally, update the editor's content with the new excerpt ranges
+            // for this editor, as well as the diagnostic blocks.
+            buffer_diagnostics_editor.update_in(cx, |buffer_diagnostics_editor, window, cx| {
+                // TODO: Remove diagnostics blocks for display map. Skipping this
+                // for now as we're just implementing the excerpts bit for now.
+
+                let (anchor_ranges, _) =
+                    buffer_diagnostics_editor
+                        .multibuffer
+                        .update(cx, |multibuffer, cx| {
+                            multibuffer.set_excerpt_ranges_for_path(
+                                PathKey::for_buffer(&buffer, cx),
+                                buffer.clone(),
+                                &buffer_snapshot,
+                                excerpt_ranges,
+                                cx,
+                            )
+                        });
+
+                // TODO: If the multibuffer was empty before the excerpt ranges
+                // were updated, update the editor's selections to the first
+                // excerpt range.
+                if was_empty {
+                    if let Some(anchor_range) = anchor_ranges.first() {
+                        let range_to_select = anchor_range.start..anchor_range.start;
+
+                        buffer_diagnostics_editor.editor.update(cx, |editor, cx| {
+                            editor.change_selections(Default::default(), window, cx, |selection| {
+                                selection.select_anchor_ranges([range_to_select])
+                            })
+                        });
+
+                        // If the `BufferDiagnosticsEditor` is currently
+                        // focused, move focus to its editor.
+                        if buffer_diagnostics_editor.focus_handle.is_focused(window) {
+                            buffer_diagnostics_editor
+                                .editor
+                                .read(cx)
+                                .focus_handle(cx)
+                                .focus(window);
+                        }
+                    }
+                }
+
+                // TODO: Finish implementation where the diagnostics blocks are
+                // added to the display map, so as to be displayed on the
+                // correct excerpts.
+                cx.notify()
+            })
+        })
+    }
+
+    fn set_diagnostics(&mut self, diagnostics: &Vec<DiagnosticEntry<Anchor>>) {
+        self.diagnostics = diagnostics.clone();
+    }
+
+    fn diagnostics_are_unchanged(
+        &self,
+        diagnostics: &Vec<DiagnosticEntry<Anchor>>,
+        snapshot: &BufferSnapshot,
+    ) -> bool {
+        if self.diagnostics.len() != diagnostics.len() {
+            return false;
+        }
+
+        self.diagnostics
+            .iter()
+            .zip(diagnostics.iter())
+            .all(|(existing, new)| {
+                existing.diagnostic.message == new.diagnostic.message
+                    && existing.diagnostic.severity == new.diagnostic.severity
+                    && existing.diagnostic.is_primary == new.diagnostic.is_primary
+                    && existing.range.to_offset(snapshot) == new.range.to_offset(snapshot)
+            })
+    }
+
+    fn focus_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus_handle.is_focused(window) && !self.multibuffer.read(cx).is_empty() {
+            self.editor.focus_handle(cx).focus(window)
+        }
+    }
+
+    fn focus_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) && !self.editor.focus_handle(cx).is_focused(window)
+        {
+            self.update_all_excerpts(window, cx);
+        }
+    }
+}
+
+impl DiagnosticsEditor for BufferDiagnosticsEditor {
+    fn get_diagnostics_for_buffer(
+        &self,
+        _buffer_id: BufferId,
+        _cx: &App,
+    ) -> Vec<DiagnosticEntry<Anchor>> {
+        // TODO: We should probably save the ID of the buffer that the buffer
+        // diagnostics editor is working with, so that, if it doesn't match the
+        // argument, we can return an empty vector.
+        self.diagnostics.clone()
     }
 }
 
