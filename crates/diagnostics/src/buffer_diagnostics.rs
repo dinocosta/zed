@@ -41,6 +41,7 @@ use project::DiagnosticSummary;
 use project::Event;
 use project::Project;
 use project::ProjectPath;
+use project::lsp_store::rust_analyzer_ext::cancel_flycheck;
 use project::lsp_store::rust_analyzer_ext::run_flycheck;
 use project::project_settings::DiagnosticSeverity;
 use project::project_settings::ProjectSettings;
@@ -75,7 +76,7 @@ actions!(
 /// with diagnostics for a single buffer, as only the excerpts of the buffer
 /// where diagnostics are available are displayed.
 pub(crate) struct BufferDiagnosticsEditor {
-    project: Entity<Project>,
+    pub project: Entity<Project>,
     focus_handle: FocusHandle,
     editor: Entity<Editor>,
     /// The current diagnostic entries in the `BufferDiagnosticsEditor`. Used to
@@ -92,13 +93,13 @@ pub(crate) struct BufferDiagnosticsEditor {
     summary: DiagnosticSummary,
     /// Keeps track of whether there's a background task already running to
     /// update the excerpts, in order to avoid firing multiple tasks for this purpose.
-    update_excerpts_task: Option<Task<Result<()>>>,
+    pub update_excerpts_task: Option<Task<Result<()>>>,
     /// Keeps track of the task responsible for updating the
     /// `BufferDiagnosticsEditor`'s diagnostic summary.
     diagnostic_summary_task: Task<()>,
     /// Tracks the state of fetching cargo diagnostics, including any running
     /// fetch tasks and the diagnostic sources being processed.
-    cargo_diagnostics_fetch: CargoDiagnosticsFetchState,
+    pub cargo_diagnostics_fetch: CargoDiagnosticsFetchState,
     /// TODO: Why do we need to keep the subscription in the struct? If we
     /// don't, it gets discarded and we'll stop receiving events?
     _subscription: Subscription,
@@ -207,6 +208,32 @@ impl BufferDiagnosticsEditor {
             editor
         });
 
+        // Subscribe to events triggered by the editor in order to correctly
+        // update the buffer's excerpts.
+        cx.subscribe_in(
+            &editor,
+            window,
+            |buffer_diagnostics_editor, _editor, event: &EditorEvent, window, cx| {
+                cx.emit(event.clone());
+
+                match event {
+                    // If the user tries to focus on the editor but there's actually
+                    // no excerpts for the buffer, focus back on the
+                    // `BufferDiagnosticsEditor` instance.
+                    EditorEvent::Focused => {
+                        if buffer_diagnostics_editor.multibuffer.read(cx).is_empty() {
+                            window.focus(&buffer_diagnostics_editor.focus_handle);
+                        }
+                    }
+                    EditorEvent::Blurred => {
+                        buffer_diagnostics_editor.update_all_excerpts(window, cx)
+                    }
+                    _ => {}
+                }
+            },
+        )
+        .detach();
+
         let diagnostics = vec![];
         let update_excerpts_task = None;
         let diagnostic_summary_task = Task::ready(());
@@ -297,7 +324,7 @@ impl BufferDiagnosticsEditor {
     // TODO: Why do we need this? Is it specific for Rust projects? Can it be
     // moved to the `diagnostics` module so it can be reused by both
     // `BufferDiagnosticsEditor` and `BufferDiagnosticsEditor`?
-    fn cargo_diagnostics_sources(&self, cx: &App) -> Vec<ProjectPath> {
+    pub fn cargo_diagnostics_sources(&self, cx: &App) -> Vec<ProjectPath> {
         let fetch_cargo_diagnostics = ProjectSettings::get_global(cx)
             .diagnostics
             .fetch_cargo_diagnostics();
@@ -323,7 +350,7 @@ impl BufferDiagnosticsEditor {
             .collect()
     }
 
-    fn fetch_cargo_diagnostics(
+    pub fn fetch_cargo_diagnostics(
         &mut self,
         diagnostics_sources: Arc<Vec<ProjectPath>>,
         cx: &mut Context<Self>,
@@ -358,6 +385,25 @@ impl BufferDiagnosticsEditor {
         }));
     }
 
+    // TODO: Why does this one need to be public while the one on
+    // `ProjectDiagnosticsEditor` is not and everything seems to be working on
+    // ToolbarControls?
+    pub fn stop_cargo_diagnostics_fetch(&mut self, cx: &mut App) {
+        self.cargo_diagnostics_fetch.fetch_task = None;
+        let mut cancel_gasks = Vec::new();
+        for buffer_path in std::mem::take(&mut self.cargo_diagnostics_fetch.diagnostic_sources)
+            .iter()
+            .cloned()
+        {
+            cancel_gasks.push(cancel_flycheck(self.project.clone(), buffer_path, cx));
+        }
+
+        self.cargo_diagnostics_fetch.cancel_task = Some(cx.background_spawn(async move {
+            let _ = join_all(cancel_gasks).await;
+            log::info!("Finished fetching cargo diagnostics");
+        }));
+    }
+
     /// Enqueue an update of all excerpts. Updates all paths that either have
     /// diagnostics or are currently present in this view to ensure that new
     /// diagnostics are added and that excerpts that are shown but no longer
@@ -367,7 +413,7 @@ impl BufferDiagnosticsEditor {
     /// single file.
     /// TODO: Update this to behave like the regular `ProjectDiagnosticsEditor`
     /// and run this in a background task with `update_stale_excerpts`.
-    fn update_all_excerpts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn update_all_excerpts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // If the background task to update the excerpts is already running,
         // stop execution to let the other instance finish.
         if self.update_excerpts_task.is_some() {
@@ -413,6 +459,7 @@ impl BufferDiagnosticsEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
+        dbg!("Updating excerpts for buffer", &buffer);
         let was_empty = self.multibuffer.read(cx).is_empty();
         let buffer_snapshot = buffer.read(cx).snapshot();
         let buffer_snapshot_max = buffer_snapshot.max_point();
@@ -425,6 +472,7 @@ impl BufferDiagnosticsEditor {
             let diagnostics = buffer_snapshot
                 .diagnostics_in_range::<_, Anchor>(Point::zero()..buffer_snapshot_max, false)
                 .collect::<Vec<_>>();
+            dbg!("DIAGNOSTICS", &diagnostics);
 
             let unchanged =
                 buffer_diagnostics_editor.update(cx, |buffer_diagnostics_editor, _cx| {
@@ -540,13 +588,14 @@ impl BufferDiagnosticsEditor {
             // Finally, update the editor's content with the new excerpt ranges
             // for this editor, as well as the diagnostic blocks.
             buffer_diagnostics_editor.update_in(cx, |buffer_diagnostics_editor, window, cx| {
-                // TODO: Remove diagnostics blocks for display map. Skipping this
+                // TODO: Remove diagnostics blocks from display map. Skipping this
                 // for now as we're just implementing the excerpts bit for now.
 
                 let (anchor_ranges, _) =
                     buffer_diagnostics_editor
                         .multibuffer
                         .update(cx, |multibuffer, cx| {
+                            dbg!(&excerpt_ranges);
                             multibuffer.set_excerpt_ranges_for_path(
                                 PathKey::for_buffer(&buffer, cx),
                                 buffer.clone(),
