@@ -19,10 +19,10 @@ impl DiagnosticsEditorHandle {}
 
 impl Render for ToolbarControls {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut include_warnings = false;
-        let mut path_matcher_enabled = false;
-        let mut path_matcher_empty = false;
+        // Not sure what the default value should be here, due to the `None` case, where not editor is
+        // associated with the toolbar controls?
         let mut has_stale_excerpts = false;
+        let mut include_warnings = false;
         let mut is_updating = false;
         let mut cargo_diagnostics_sources = Vec::new();
 
@@ -31,8 +31,6 @@ impl Render for ToolbarControls {
                 if let Some(editor) = editor.upgrade() {
                     let diagnostics = editor.read(cx);
                     include_warnings = diagnostics.include_warnings;
-                    path_matcher_enabled = diagnostics.path_matcher_enabled;
-                    path_matcher_empty = diagnostics.path_matcher.sources().is_empty();
                     has_stale_excerpts = !diagnostics.paths_to_update.is_empty();
                     cargo_diagnostics_sources = diagnostics.cargo_diagnostics_sources(cx);
                     is_updating = diagnostics.cargo_diagnostics_fetch.fetch_task.is_some()
@@ -49,9 +47,6 @@ impl Render for ToolbarControls {
                 if let Some(editor) = editor.upgrade() {
                     let diagnostics = editor.read(cx);
                     include_warnings = true;
-                    // Buffer diagnostics doesn't use path matcher
-                    path_matcher_enabled = false;
-                    path_matcher_empty = true;
                     has_stale_excerpts = false;
                     is_updating = diagnostics.cargo_diagnostics_fetch.fetch_task.is_some()
                         || diagnostics.update_excerpts_task.is_some()
@@ -79,16 +74,6 @@ impl Render for ToolbarControls {
             Color::Warning
         } else {
             Color::Muted
-        };
-
-        let filter_tooltip = match path_matcher_enabled {
-            true => "All Files",
-            false => "Active File Only",
-        };
-
-        let filter_color = match path_matcher_enabled {
-            true => Color::Info,
-            false => Color::Muted,
         };
 
         h_flex()
@@ -210,28 +195,6 @@ impl Render for ToolbarControls {
                                 |project_diagnostics_editor, cx| {
                                     project_diagnostics_editor.toggle_warnings(
                                         &Default::default(),
-                                        window,
-                                        cx,
-                                    );
-                                },
-                            );
-                        }
-                        _ => {}
-                    })),
-            )
-            .child(
-                IconButton::new("toggle-path-matcher", IconName::Filter)
-                    .disabled(path_matcher_empty)
-                    .icon_color(filter_color)
-                    .shape(IconButtonShape::Square)
-                    .tooltip(Tooltip::text(filter_tooltip))
-                    .on_click(cx.listener(|this, _, window, cx| match &this.editor {
-                        Some(DiagnosticsEditorHandle::Project(project_diagnostics_editor)) => {
-                            let _ = project_diagnostics_editor.update(
-                                cx,
-                                |project_diagnostics_editor, cx| {
-                                    project_diagnostics_editor.set_path_matcher_enabled(
-                                        !project_diagnostics_editor.path_matcher_enabled,
                                         window,
                                         cx,
                                     );
