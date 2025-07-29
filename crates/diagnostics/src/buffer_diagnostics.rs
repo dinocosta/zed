@@ -13,6 +13,10 @@ use editor::EditorEvent;
 use editor::ExcerptRange;
 use editor::MultiBuffer;
 use editor::PathKey;
+use editor::display_map::BlockPlacement;
+use editor::display_map::BlockProperties;
+use editor::display_map::BlockStyle;
+use editor::display_map::CustomBlockId;
 use futures::future::join_all;
 use gpui::AnyElement;
 use gpui::App;
@@ -83,6 +87,9 @@ pub(crate) struct BufferDiagnosticsEditor {
     /// allow quick comparison of updated diagnostics, to confirm if anything
     /// has changed.
     diagnostics: Vec<DiagnosticEntry<Anchor>>,
+    /// The blocks used to display the diagnostics' content in the editor, next
+    /// to the excerpts where the diagnostic originated.
+    blocks: Vec<CustomBlockId>,
     /// Multibuffer to contain all excerpts that contain diagnostics, which are
     /// to be rendered in the editor.
     multibuffer: Entity<MultiBuffer>,
@@ -242,6 +249,7 @@ impl BufferDiagnosticsEditor {
             focus_handle,
             editor,
             diagnostics,
+            blocks: Default::default(),
             multibuffer,
             project_path,
             summary,
@@ -538,10 +546,6 @@ impl BufferDiagnosticsEditor {
 
             let mut blocks: Vec<DiagnosticBlock<BufferDiagnosticsEditor>> = Vec::new();
             for (_, group) in grouped {
-                // TODO: Actually implement this, as
-                // `diagnostic_blocks_for_group` expects the second argument to
-                // be `ProjectDiagnosticsEditor`, so it'll need to be refactored
-                // to also work with `BufferDiagnosticsEditor`.
                 let diagnostic_blocks = cx.update(|_window, cx| {
                     DiagnosticRenderer::diagnostic_blocks_for_group(
                         group,
@@ -622,8 +626,16 @@ impl BufferDiagnosticsEditor {
             // Finally, update the editor's content with the new excerpt ranges
             // for this editor, as well as the diagnostic blocks.
             buffer_diagnostics_editor.update_in(cx, |buffer_diagnostics_editor, window, cx| {
-                // TODO: Remove diagnostics blocks from display map. Skipping this
-                // for now as we're just implementing the excerpts bit for now.
+                // Remove the list of `CustomBlockId` from the editor's display
+                // map, ensuring that if any diagnostics have been solved, the
+                // associated block stops being shown.
+                let block_ids = buffer_diagnostics_editor.blocks.clone();
+
+                buffer_diagnostics_editor.editor.update(cx, |editor, cx| {
+                    editor.display_map.update(cx, |display_map, cx| {
+                        display_map.remove_blocks(block_ids.into_iter().collect(), cx);
+                    })
+                });
 
                 let (anchor_ranges, _) =
                     buffer_diagnostics_editor
@@ -663,9 +675,35 @@ impl BufferDiagnosticsEditor {
                     }
                 }
 
-                // TODO: Finish implementation where the diagnostics blocks are
-                // added to the display map, so as to be displayed on the
-                // correct excerpts.
+                // Build new diagnostic blocks to be added to the editor's
+                // display map for the new diagnostics. Update the `blocks`
+                // property before finishing, to ensure the blocks are removed
+                // on the next execution.
+                let editor_blocks =
+                    anchor_ranges
+                        .into_iter()
+                        .zip(blocks.into_iter())
+                        .map(|(anchor, block)| {
+                            let editor = buffer_diagnostics_editor.editor.downgrade();
+
+                            BlockProperties {
+                                placement: BlockPlacement::Near(anchor.start),
+                                height: Some(1),
+                                style: BlockStyle::Flex,
+                                render: Arc::new(move |block_context| {
+                                    block.render_block(editor.clone(), block_context)
+                                }),
+                                priority: 1,
+                            }
+                        });
+
+                let block_ids = buffer_diagnostics_editor.editor.update(cx, |editor, cx| {
+                    editor.display_map.update(cx, |display_map, cx| {
+                        display_map.insert_blocks(editor_blocks, cx)
+                    })
+                });
+
+                buffer_diagnostics_editor.blocks = block_ids;
                 cx.notify()
             })
         })
