@@ -114,17 +114,16 @@ impl BufferDiagnosticsEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Subscribe to project events related to diagnostics so the `BufferDiagnosticsEditor` can update its state accordingly.
+        // Subscribe to project events related to diagnostics so the
+        // `BufferDiagnosticsEditor` can update its state accordingly.
         let project_event_subscription = cx.subscribe_in(
             &project_handle,
             window,
             |buffer_diagnostics_editor, _project, event, window, cx| match event {
                 Event::DiskBasedDiagnosticsStarted { .. } => {
-                    log::debug!("disk based diagnostics started");
                     cx.notify();
                 }
-                Event::DiskBasedDiagnosticsFinished { language_server_id } => {
-                    log::debug!("disk based diagnostics finished for server {language_server_id}");
+                Event::DiskBasedDiagnosticsFinished { .. } => {
                     buffer_diagnostics_editor.update_all_excerpts(window, cx);
                 }
                 Event::DiagnosticsUpdated {
@@ -158,7 +157,7 @@ impl BufferDiagnosticsEditor {
                             log::debug!("diagnostics updated for server {language_server_id}, path {path:?}. recording change");
                         } else {
                             log::debug!("diagnostics updated for server {language_server_id}, path {path:?}. updating excerpts");
-                            buffer_diagnostics_editor.update_all_excerpts(window, cx);
+                            buffer_diagnostics_editor.update_stale_excerpts(window, cx);
                         }
                     }
                 }
@@ -404,6 +403,45 @@ impl BufferDiagnosticsEditor {
         }));
     }
 
+    // TODO: Refactor this, since there's only a single project path, we can
+    // probably fetch its buffer and not actually need to have
+    // `update_stale_excerpts`, `update_all_excerpts` and `update_excerpts`.
+    fn update_stale_excerpts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // If there's already a task updating the excerpts, early return and let
+        // the other task finish.
+        if self.update_excerpts_task.is_some() {
+            return;
+        }
+
+        let project_handle = self.project.clone();
+        let project_path = self.project_path.clone();
+
+        self.update_excerpts_task = Some(cx.spawn_in(window, async move |editor, cx| {
+            cx.background_executor()
+                .timer(DIAGNOSTICS_UPDATE_DELAY)
+                .await;
+
+            let buffer = project_handle
+                .update(cx, |project, cx| {
+                    project.open_buffer(project_path.clone(), cx)
+                })?
+                .await
+                .log_err();
+
+            if let Some(buffer) = buffer {
+                editor
+                    .update_in(cx, |editor, window, cx| {
+                        editor.update_excerpts_task = None;
+                        cx.notify();
+                        editor.update_excerpts(buffer, window, cx)
+                    })?
+                    .await?;
+            };
+
+            Ok(())
+        }));
+    }
+
     /// Enqueue an update of all excerpts. Updates all paths that either have
     /// diagnostics or are currently present in this view to ensure that new
     /// diagnostics are added and that excerpts that are shown but no longer
@@ -439,8 +477,6 @@ impl BufferDiagnosticsEditor {
                 {
                     buffer_diagnostics_editor
                         .update_in(cx, |buffer_diagnostics_editor, window, cx| {
-                            // Reset the `excerpts_tasks` to `None` so another instance can run.
-                            buffer_diagnostics_editor.update_excerpts_task = None;
                             buffer_diagnostics_editor.update_excerpts(buffer, window, cx)
                         })?
                         .await?;
@@ -459,7 +495,6 @@ impl BufferDiagnosticsEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
-        dbg!("Updating excerpts for buffer", &buffer);
         let was_empty = self.multibuffer.read(cx).is_empty();
         let buffer_snapshot = buffer.read(cx).snapshot();
         let buffer_snapshot_max = buffer_snapshot.max_point();
@@ -472,7 +507,6 @@ impl BufferDiagnosticsEditor {
             let diagnostics = buffer_snapshot
                 .diagnostics_in_range::<_, Anchor>(Point::zero()..buffer_snapshot_max, false)
                 .collect::<Vec<_>>();
-            dbg!("DIAGNOSTICS", &diagnostics);
 
             let unchanged =
                 buffer_diagnostics_editor.update(cx, |buffer_diagnostics_editor, _cx| {
@@ -595,7 +629,6 @@ impl BufferDiagnosticsEditor {
                     buffer_diagnostics_editor
                         .multibuffer
                         .update(cx, |multibuffer, cx| {
-                            dbg!(&excerpt_ranges);
                             multibuffer.set_excerpt_ranges_for_path(
                                 PathKey::for_buffer(&buffer, cx),
                                 buffer.clone(),
