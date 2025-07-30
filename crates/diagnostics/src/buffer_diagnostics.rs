@@ -131,7 +131,7 @@ impl BufferDiagnosticsEditor {
                     cx.notify();
                 }
                 Event::DiskBasedDiagnosticsFinished { .. } => {
-                    buffer_diagnostics_editor.update_all_excerpts(window, cx);
+                    buffer_diagnostics_editor.update_stale_excerpts(window, cx);
                 }
                 Event::DiagnosticsUpdated {
                     path,
@@ -439,11 +439,14 @@ impl BufferDiagnosticsEditor {
             if let Some(buffer) = buffer {
                 editor
                     .update_in(cx, |editor, window, cx| {
-                        editor.update_excerpts_task = None;
-                        cx.notify();
                         editor.update_excerpts(buffer, window, cx)
                     })?
                     .await?;
+
+                let _ = editor.update(cx, |editor, cx| {
+                    editor.update_excerpts_task = None;
+                    cx.notify();
+                });
             };
 
             Ok(())
@@ -460,39 +463,7 @@ impl BufferDiagnosticsEditor {
     /// TODO: Update this to behave like the regular `ProjectDiagnosticsEditor`
     /// and run this in a background task with `update_stale_excerpts`.
     pub fn update_all_excerpts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // If the background task to update the excerpts is already running,
-        // stop execution to let the other instance finish.
-        if self.update_excerpts_task.is_some() {
-            return;
-        }
-
-        let project_handle = self.project.clone();
-        let project_path = self.project_path.clone();
-
-        self.update_excerpts_task = Some(cx.spawn_in(
-            window,
-            async move |buffer_diagnostics_editor, cx| {
-                cx.background_executor()
-                    .timer(DIAGNOSTICS_UPDATE_DELAY)
-                    .await;
-
-                if let Some(buffer) = project_handle
-                    .update(cx, |project, cx| {
-                        project.open_buffer(project_path.clone(), cx)
-                    })?
-                    .await
-                    .log_err()
-                {
-                    buffer_diagnostics_editor
-                        .update_in(cx, |buffer_diagnostics_editor, window, cx| {
-                            buffer_diagnostics_editor.update_excerpts(buffer, window, cx)
-                        })?
-                        .await?;
-                }
-
-                Ok(())
-            },
-        ));
+        self.update_stale_excerpts(window, cx);
     }
 
     /// Updates the excerpts in the `BufferDiagnosticsEditor` for a single
