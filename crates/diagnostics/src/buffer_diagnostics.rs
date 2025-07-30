@@ -232,7 +232,7 @@ impl BufferDiagnosticsEditor {
                         }
                     }
                     EditorEvent::Blurred => {
-                        buffer_diagnostics_editor.update_all_excerpts(window, cx)
+                        buffer_diagnostics_editor.update_stale_excerpts(window, cx)
                     }
                     _ => {}
                 }
@@ -705,6 +705,9 @@ impl BufferDiagnosticsEditor {
     }
 
     fn focus_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // If the `BufferDiagnosticsEditor` is focused and the multibuffer is
+        // not empty, focus on the editor instead, which will allow the user to
+        // start interacting and editing the buffer's contents.
         if self.focus_handle.is_focused(window) && !self.multibuffer.read(cx).is_empty() {
             self.editor.focus_handle(cx).focus(window)
         }
@@ -798,7 +801,7 @@ impl Render for BufferDiagnosticsEditor {
         let warning_count = &self.summary.warning_count;
 
         // No excerpts to be displayed.
-        if error_count + warning_count == 0 {
+        let child = if error_count + warning_count == 0 {
             let label = format!(
                 "No problems in {}",
                 self.project_path.path.to_sanitized_string()
@@ -815,6 +818,12 @@ impl Render for BufferDiagnosticsEditor {
                 .child(Label::new(label).color(Color::Muted))
         } else {
             div().size_full().child(self.editor.clone())
-        }
+        };
+
+        div()
+            .key_context("Diagnostics")
+            .track_focus(&self.focus_handle(cx))
+            .size_full()
+            .child(child)
     }
 }
