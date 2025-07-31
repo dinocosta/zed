@@ -66,7 +66,9 @@ use util::ResultExt;
 use util::paths::PathExt;
 use util::paths::PathMatcher;
 use workspace::ItemHandle;
+use workspace::ToolbarItemLocation;
 use workspace::Workspace;
+use workspace::item::BreadcrumbText;
 use workspace::item::Item;
 use workspace::item::TabContentParams;
 
@@ -811,6 +813,14 @@ impl EventEmitter<EditorEvent> for BufferDiagnosticsEditor {}
 impl Item for BufferDiagnosticsEditor {
     type Event = EditorEvent;
 
+    fn breadcrumb_location(&self, _: &App) -> ToolbarItemLocation {
+        ToolbarItemLocation::PrimaryLeft
+    }
+
+    fn breadcrumbs(&self, theme: &theme::Theme, cx: &App) -> Option<Vec<BreadcrumbText>> {
+        self.editor.breadcrumbs(theme, cx)
+    }
+
     // Builds the content to be displayed in the tab.
     fn tab_content(&self, params: TabContentParams, _window: &Window, _app: &App) -> AnyElement {
         let error_count = self.summary.error_count;
@@ -858,6 +868,20 @@ impl Item for BufferDiagnosticsEditor {
             )
             .into(),
         )
+    }
+
+    fn can_save(&self, _cx: &App) -> bool {
+        true
+    }
+
+    fn save(
+        &mut self,
+        options: workspace::item::SaveOptions,
+        project: Entity<Project>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        self.editor.save(options, project, window, cx)
     }
 }
 
