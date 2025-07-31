@@ -181,19 +181,15 @@ impl BufferDiagnosticsEditor {
         // Whenever the `IncludeWarnings` setting changes, update the
         // `include_warnings` field, update the associated editor's
         // `max_diagnostics_severity` accordingly as well as the diagnostics and
-        // exceprpts, ensuring that the warnings are correctly included or
+        // excerpts, ensuring that the warnings are correctly included or
         // excluded from the summary and excerpts.
         cx.observe_global_in::<IncludeWarnings>(window, |buffer_diagnostics_editor, window, cx| {
             let include_warnings = cx.global::<IncludeWarnings>().0;
+            let max_severity = Self::max_diagnostics_severity(include_warnings);
+
             buffer_diagnostics_editor.include_warnings = include_warnings;
             buffer_diagnostics_editor.editor.update(cx, |editor, cx| {
-                editor.set_max_diagnostics_severity(
-                    match include_warnings {
-                        true => DiagnosticSeverity::Warning,
-                        false => DiagnosticSeverity::Error,
-                    },
-                    cx,
-                );
+                editor.set_max_diagnostics_severity(max_severity, cx);
             });
 
             buffer_diagnostics_editor.diagnostics.clear();
@@ -229,6 +225,7 @@ impl BufferDiagnosticsEditor {
         );
 
         let multibuffer = cx.new(|cx| MultiBuffer::new(project_handle.read(cx).capability()));
+        let max_severity = Self::max_diagnostics_severity(include_warnings);
         let editor = cx.new(|cx| {
             let mut editor = Editor::for_multibuffer(
                 multibuffer.clone(),
@@ -238,7 +235,7 @@ impl BufferDiagnosticsEditor {
             );
             editor.set_vertical_scroll_margin(5, cx);
             editor.disable_inline_diagnostics();
-            editor.set_max_diagnostics_severity(DiagnosticSeverity::Warning, cx);
+            editor.set_max_diagnostics_severity(max_severity, cx);
             editor.set_all_diagnostics_active(cx);
             editor
         });
@@ -520,10 +517,9 @@ impl BufferDiagnosticsEditor {
         let was_empty = self.multibuffer.read(cx).is_empty();
         let buffer_snapshot = buffer.read(cx).snapshot();
         let buffer_snapshot_max = buffer_snapshot.max_point();
-        let max_severity = match self.include_warnings {
-            true => lsp::DiagnosticSeverity::WARNING,
-            false => lsp::DiagnosticSeverity::ERROR,
-        };
+        let max_severity = Self::max_diagnostics_severity(self.include_warnings)
+            .into_lsp()
+            .unwrap_or(lsp::DiagnosticSeverity::WARNING);
 
         cx.spawn_in(window, async move |buffer_diagnostics_editor, mut cx| {
             // Fetch the diagnostics for the whole of the buffer
@@ -781,6 +777,13 @@ impl BufferDiagnosticsEditor {
 
     pub fn toggle_warnings(&mut self, _: &ToggleWarnings, _: &mut Window, cx: &mut Context<Self>) {
         cx.set_global(IncludeWarnings(!self.include_warnings));
+    }
+
+    fn max_diagnostics_severity(include_warnings: bool) -> DiagnosticSeverity {
+        match include_warnings {
+            true => DiagnosticSeverity::Warning,
+            false => DiagnosticSeverity::Error,
+        }
     }
 }
 
