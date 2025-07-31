@@ -46,7 +46,11 @@ impl Render for ToolbarControls {
             Some(DiagnosticsEditorHandle::Buffer(editor)) => {
                 if let Some(editor) = editor.upgrade() {
                     let diagnostics = editor.read(cx);
-                    include_warnings = true;
+                    include_warnings = diagnostics.include_warnings;
+                    // TODO: How to calculate this for the
+                    // `BufferDiagnosticsEditor`? Should we simply keep track if
+                    // there are any updates to the diagnostics for the path and
+                    // mark that instead of automatically updating?
                     has_stale_excerpts = false;
                     is_updating = diagnostics.cargo_diagnostics_fetch.fetch_task.is_some()
                         || diagnostics.update_excerpts_task.is_some()
@@ -194,6 +198,18 @@ impl Render for ToolbarControls {
                                 cx,
                                 |project_diagnostics_editor, cx| {
                                     project_diagnostics_editor.toggle_warnings(
+                                        &Default::default(),
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            );
+                        }
+                        Some(DiagnosticsEditorHandle::Buffer(buffer_diagnostics_editor)) => {
+                            let _ = buffer_diagnostics_editor.update(
+                                cx,
+                                |buffer_diagnostics_editor, cx| {
+                                    buffer_diagnostics_editor.toggle_warnings(
                                         &Default::default(),
                                         window,
                                         cx,
