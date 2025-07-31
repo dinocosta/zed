@@ -1,6 +1,8 @@
 use crate::CargoDiagnosticsFetchState;
 use crate::DIAGNOSTICS_SUMMARY_UPDATE_DELAY;
 use crate::DIAGNOSTICS_UPDATE_DELAY;
+use crate::IncludeWarnings;
+use crate::ToggleWarnings;
 use crate::context_range_for_entry;
 use crate::diagnostic_renderer::DiagnosticBlock;
 use crate::diagnostic_renderer::DiagnosticRenderer;
@@ -98,6 +100,9 @@ pub(crate) struct BufferDiagnosticsEditor {
     /// Summary of the number of warnings and errors for the path. Used to
     /// display the number of warnings and errors in the tab's content.
     summary: DiagnosticSummary,
+    /// Whether to include warnings in the list of diagnostics shown in the
+    /// editor.
+    pub include_warnings: bool,
     /// Keeps track of whether there's a background task already running to
     /// update the excerpts, in order to avoid firing multiple tasks for this purpose.
     pub update_excerpts_task: Option<Task<Result<()>>>,
@@ -118,6 +123,7 @@ impl BufferDiagnosticsEditor {
     fn new(
         project_path: ProjectPath,
         project_handle: Entity<Project>,
+        include_warnings: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -171,6 +177,29 @@ impl BufferDiagnosticsEditor {
                 _ => {}
             },
         );
+
+        // Whenever the `IncludeWarnings` setting changes, update the
+        // `include_warnings` field, update the associated editor's
+        // `max_diagnostics_severity` accordingly as well as the diagnostics and
+        // exceprpts, ensuring that the warnings are correctly included or
+        // excluded from the summary and excerpts.
+        cx.observe_global_in::<IncludeWarnings>(window, |buffer_diagnostics_editor, window, cx| {
+            let include_warnings = cx.global::<IncludeWarnings>().0;
+            buffer_diagnostics_editor.include_warnings = include_warnings;
+            buffer_diagnostics_editor.editor.update(cx, |editor, cx| {
+                editor.set_max_diagnostics_severity(
+                    match include_warnings {
+                        true => DiagnosticSeverity::Warning,
+                        false => DiagnosticSeverity::Error,
+                    },
+                    cx,
+                );
+            });
+
+            buffer_diagnostics_editor.diagnostics.clear();
+            buffer_diagnostics_editor.update_all_diagnostics(false, window, cx);
+        })
+        .detach();
 
         let project = project_handle.clone();
         let focus_handle = cx.focus_handle();
@@ -253,6 +282,7 @@ impl BufferDiagnosticsEditor {
             multibuffer,
             project_path,
             summary,
+            include_warnings,
             update_excerpts_task,
             diagnostic_summary_task,
             cargo_diagnostics_fetch,
@@ -287,8 +317,21 @@ impl BufferDiagnosticsEditor {
             if let Some(editor) = existing_editor {
                 workspace.activate_item(&editor, true, true, window, cx);
             } else {
-                let item =
-                    cx.new(|cx| Self::new(project_path, workspace.project().clone(), window, cx));
+                let include_warnings = match cx.try_global::<IncludeWarnings>() {
+                    Some(include_warnings) => include_warnings.0,
+                    None => ProjectSettings::get_global(cx).diagnostics.include_warnings,
+                };
+
+                let item = cx.new(|cx| {
+                    Self::new(
+                        project_path,
+                        workspace.project().clone(),
+                        include_warnings,
+                        window,
+                        cx,
+                    )
+                });
+
                 workspace.add_item_to_active_pane(Box::new(item), None, true, window, cx);
             }
         }
@@ -477,6 +520,10 @@ impl BufferDiagnosticsEditor {
         let was_empty = self.multibuffer.read(cx).is_empty();
         let buffer_snapshot = buffer.read(cx).snapshot();
         let buffer_snapshot_max = buffer_snapshot.max_point();
+        let max_severity = match self.include_warnings {
+            true => lsp::DiagnosticSeverity::WARNING,
+            false => lsp::DiagnosticSeverity::ERROR,
+        };
 
         cx.spawn_in(window, async move |buffer_diagnostics_editor, mut cx| {
             // Fetch the diagnostics for the whole of the buffer
@@ -517,6 +564,18 @@ impl BufferDiagnosticsEditor {
 
             let mut blocks: Vec<DiagnosticBlock<BufferDiagnosticsEditor>> = Vec::new();
             for (_, group) in grouped {
+                // If the minimum severity of the group is higher than the
+                // maximum severity, or it doesn't even have severity, skip this
+                // group.
+                if group
+                    .iter()
+                    .map(|d| d.diagnostic.severity)
+                    .min()
+                    .is_none_or(|severity| severity > max_severity)
+                {
+                    continue;
+                }
+
                 let diagnostic_blocks = cx.update(|_window, cx| {
                     DiagnosticRenderer::diagnostic_blocks_for_group(
                         group,
@@ -719,6 +778,10 @@ impl BufferDiagnosticsEditor {
             self.update_all_excerpts(window, cx);
         }
     }
+
+    pub fn toggle_warnings(&mut self, _: &ToggleWarnings, _: &mut Window, cx: &mut Context<Self>) {
+        cx.set_global(IncludeWarnings(!self.include_warnings));
+    }
 }
 
 impl DiagnosticsEditor for BufferDiagnosticsEditor {
@@ -797,15 +860,19 @@ impl Item for BufferDiagnosticsEditor {
 
 impl Render for BufferDiagnosticsEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let error_count = &self.summary.error_count;
-        let warning_count = &self.summary.warning_count;
+        let filename = self.project_path.path.to_sanitized_string();
+        let error_count = self.summary.error_count;
+        let warning_count = match self.include_warnings {
+            true => self.summary.warning_count,
+            false => 0,
+        };
 
         // No excerpts to be displayed.
         let child = if error_count + warning_count == 0 {
-            let label = format!(
-                "No problems in {}",
-                self.project_path.path.to_sanitized_string()
-            );
+            let label = match warning_count {
+                0 => format!("No problems in {}", filename),
+                _ => format!("No errors in {}", filename),
+            };
 
             v_flex()
                 .key_context("EmptyPane")
