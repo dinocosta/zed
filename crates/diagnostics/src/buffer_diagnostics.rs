@@ -883,6 +883,25 @@ impl Render for BufferDiagnosticsEditor {
                 .text_center()
                 .bg(cx.theme().colors().editor_background)
                 .child(Label::new(label).color(Color::Muted))
+                .when(self.summary.warning_count > 0, |div| {
+                    let label = match self.summary.warning_count {
+                        1 => "Show 1 warning".into(),
+                        warning_count => format!("Show {} warnings", warning_count),
+                    };
+
+                    div.child(
+                        Button::new("diagnostics-show-warning-label", label).on_click(cx.listener(
+                            |buffer_diagnostics_editor, _, window, cx| {
+                                buffer_diagnostics_editor.toggle_warnings(
+                                    &Default::default(),
+                                    window,
+                                    cx,
+                                );
+                                cx.notify();
+                            },
+                        )),
+                    )
+                })
         } else {
             div().size_full().child(self.editor.clone())
         };
