@@ -116,7 +116,7 @@ use text::{Anchor, BufferId, OffsetRangeExt, Point, Rope};
 use toolchain_store::EmptyToolchainStore;
 use util::{
     ResultExt as _,
-    paths::{PathMatcher, PathStyle, RemotePathBuf, SanitizedPath, compare_paths},
+    paths::{PathStyle, RemotePathBuf, SanitizedPath, compare_paths},
 };
 use worktree::{CreatedEntry, Snapshot, Traversal};
 pub use worktree::{
@@ -4314,15 +4314,16 @@ impl Project {
             .diagnostic_summary(include_ignored, cx)
     }
 
-    pub fn diagnostic_summary_for_paths(
+    /// Returns a summary of the diagnostics for the provided project path only.
+    pub fn diagnostic_summary_for_path(
         &self,
-        path_matcher: &PathMatcher,
+        path: &ProjectPath,
         include_ignored: bool,
         cx: &App,
     ) -> DiagnosticSummary {
         self.lsp_store
             .read(cx)
-            .diagnostic_summary_for_paths(path_matcher, include_ignored, cx)
+            .diagnostic_summary_for_path(path, include_ignored, cx)
     }
 
     pub fn diagnostic_summaries<'a>(
@@ -4332,7 +4333,7 @@ impl Project {
     ) -> impl Iterator<Item = (ProjectPath, LanguageServerId, DiagnosticSummary)> + 'a {
         self.lsp_store
             .read(cx)
-            .diagnostic_summaries(include_ignored, None, cx)
+            .diagnostic_summaries(include_ignored, cx)
     }
 
     pub fn active_entry(&self) -> Option<ProjectEntryId> {

@@ -64,7 +64,6 @@ use ui::h_flex;
 use ui::prelude::*;
 use util::ResultExt;
 use util::paths::PathExt;
-use util::paths::PathMatcher;
 use workspace::ItemHandle;
 use workspace::ToolbarItemLocation;
 use workspace::Workspace;
@@ -114,8 +113,8 @@ pub(crate) struct BufferDiagnosticsEditor {
     /// Tracks the state of fetching cargo diagnostics, including any running
     /// fetch tasks and the diagnostic sources being processed.
     pub cargo_diagnostics_fetch: CargoDiagnosticsFetchState,
-    /// TODO: Why do we need to keep the subscription in the struct? If we
-    /// don't, it gets discarded and we'll stop receiving events?
+    /// The project's subscription, responsible for processing events related to
+    /// diagnostics.
     _subscription: Subscription,
 }
 
@@ -162,11 +161,6 @@ impl BufferDiagnosticsEditor {
                                     })
                                     .log_err();
                             });
-
-                            // TODO: Why are we emitting this event? Because the
-                            // tab's title can change when the summary is
-                            // updated?
-                            cx.emit(EditorEvent::TitleChanged);
 
                         if buffer_diagnostics_editor.editor.focus_handle(cx).contains_focused(window, cx) || buffer_diagnostics_editor.focus_handle.contains_focused(window, cx) {
                             log::debug!("diagnostics updated for server {language_server_id}, path {path:?}. recording change");
@@ -218,13 +212,9 @@ impl BufferDiagnosticsEditor {
         )
         .detach();
 
-        // TODO: Update this to eventually remove the hard-coded values.
-        // TODO: Leverage `project.diagnostic_summary_for_path(path, false, cx)`
-        let summary = project_handle.read(cx).diagnostic_summary_for_paths(
-            &PathMatcher::new([project_path.path.to_sanitized_string()]).unwrap(),
-            false,
-            cx,
-        );
+        let summary = project_handle
+            .read(cx)
+            .diagnostic_summary_for_path(&project_path, false, cx);
 
         let multibuffer = cx.new(|cx| MultiBuffer::new(project_handle.read(cx).capability()));
         let max_severity = Self::max_diagnostics_severity(include_warnings);
@@ -362,12 +352,7 @@ impl BufferDiagnosticsEditor {
     fn update_diagnostic_summary(&mut self, cx: &mut Context<Self>) {
         let project = self.project.read(cx);
 
-        // TODO: Update this to deal only with the `self.project_path` path and not all diagnostics.
-        self.summary = project.diagnostic_summary_for_paths(
-            &PathMatcher::new([self.project_path.path.to_sanitized_string()]).unwrap(),
-            false,
-            cx,
-        );
+        self.summary = project.diagnostic_summary_for_path(&self.project_path, false, cx);
     }
 
     // TODO: Why do we need this? Is it specific for Rust projects? Can it be

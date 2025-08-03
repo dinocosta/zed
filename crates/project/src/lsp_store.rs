@@ -70,8 +70,6 @@ use node_runtime::read_package_installed_version;
 use parking_lot::Mutex;
 use postage::{mpsc, sink::Sink, stream::Stream, watch};
 use rand::prelude::*;
-use util::paths::PathMatcher;
-
 use rpc::{
     AnyProtoClient,
     proto::{FromProto, ToProto},
@@ -7225,28 +7223,27 @@ impl LspStore {
 
     pub fn diagnostic_summary(&self, include_ignored: bool, cx: &App) -> DiagnosticSummary {
         let mut summary = DiagnosticSummary::default();
-        for (_, _, path_summary) in self.diagnostic_summaries(include_ignored, None, cx) {
+        for (_, _, path_summary) in self.diagnostic_summaries(include_ignored, cx) {
             summary.error_count += path_summary.error_count;
             summary.warning_count += path_summary.warning_count;
         }
         summary
     }
 
-    /// Returns a summary of all diagnostics for files that match the given path matcher.
-    pub fn diagnostic_summary_for_paths(
+    /// Returns the diagnostic summary for a specific project path.
+    pub fn diagnostic_summary_for_path(
         &self,
-        path_matcher: &PathMatcher,
+        project_path: &ProjectPath,
         include_ignored: bool,
         cx: &App,
     ) -> DiagnosticSummary {
-        let mut summary = DiagnosticSummary::default();
-        for (_, _, path_summary) in
-            self.diagnostic_summaries(include_ignored, Some(path_matcher), cx)
+        match self
+            .diagnostic_summaries(include_ignored, cx)
+            .find(|(path, _, _)| path == project_path)
         {
-            summary.error_count += path_summary.error_count;
-            summary.warning_count += path_summary.warning_count;
+            Some((_, _, diagnostic_summary)) => diagnostic_summary,
+            None => DiagnosticSummary::default(),
         }
-        summary
     }
 
     /// When `path_matcher` is provided, only diagnostics for matching paths
@@ -7254,7 +7251,6 @@ impl LspStore {
     pub fn diagnostic_summaries<'a>(
         &'a self,
         include_ignored: bool,
-        path_matcher: Option<&'a PathMatcher>,
         cx: &'a App,
     ) -> impl Iterator<Item = (ProjectPath, LanguageServerId, DiagnosticSummary)> + 'a {
         self.worktree_store
@@ -7269,14 +7265,10 @@ impl LspStore {
                 summaries
                     .iter()
                     .filter(move |(path, _)| {
-                        if let Some(path_matcher) = path_matcher {
-                            (*path_matcher).is_match((*path).clone())
-                        } else {
-                            include_ignored
-                                || worktree
-                                    .entry_for_path(path.as_ref())
-                                    .map_or(false, |entry| !entry.is_ignored)
-                        }
+                        include_ignored
+                            || worktree
+                                .entry_for_path(path.as_ref())
+                                .map_or(false, |entry| !entry.is_ignored)
                     })
                     .flat_map(move |(path, summaries)| {
                         summaries.iter().map(move |(server_id, summary)| {
