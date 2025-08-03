@@ -138,7 +138,7 @@ impl BufferDiagnosticsEditor {
                     cx.notify();
                 }
                 Event::DiskBasedDiagnosticsFinished { .. } => {
-                    buffer_diagnostics_editor.update_stale_excerpts(window, cx);
+                    buffer_diagnostics_editor.update_all_excerpts(window, cx);
                 }
                 Event::DiagnosticsUpdated {
                     path,
@@ -166,7 +166,7 @@ impl BufferDiagnosticsEditor {
                             log::debug!("diagnostics updated for server {language_server_id}, path {path:?}. recording change");
                         } else {
                             log::debug!("diagnostics updated for server {language_server_id}, path {path:?}. updating excerpts");
-                            buffer_diagnostics_editor.update_stale_excerpts(window, cx);
+                            buffer_diagnostics_editor.update_all_excerpts(window, cx);
                         }
                     }
                 }
@@ -250,7 +250,7 @@ impl BufferDiagnosticsEditor {
                         }
                     }
                     EditorEvent::Blurred => {
-                        buffer_diagnostics_editor.update_stale_excerpts(window, cx)
+                        buffer_diagnostics_editor.update_all_excerpts(window, cx)
                     }
                     _ => {}
                 }
@@ -355,10 +355,7 @@ impl BufferDiagnosticsEditor {
         self.summary = project.diagnostic_summary_for_path(&self.project_path, false, cx);
     }
 
-    // TODO: Why do we need this? Is it specific for Rust projects? Can it be
-    // moved to the `diagnostics` module so it can be reused by both
-    // `BufferDiagnosticsEditor` and `BufferDiagnosticsEditor`?
-    pub fn cargo_diagnostics_sources(&self, cx: &App) -> Vec<ProjectPath> {
+    pub(crate) fn cargo_diagnostics_sources(&self, cx: &App) -> Vec<ProjectPath> {
         let fetch_cargo_diagnostics = ProjectSettings::get_global(cx)
             .diagnostics
             .fetch_cargo_diagnostics();
@@ -393,6 +390,7 @@ impl BufferDiagnosticsEditor {
         self.cargo_diagnostics_fetch.cancel_task = None;
         self.cargo_diagnostics_fetch.fetch_task = None;
         self.cargo_diagnostics_fetch.diagnostic_sources = diagnostics_sources.clone();
+
         if self.cargo_diagnostics_fetch.diagnostic_sources.is_empty() {
             return;
         }
@@ -419,10 +417,7 @@ impl BufferDiagnosticsEditor {
         }));
     }
 
-    // TODO: Why does this one need to be public while the one on
-    // `ProjectDiagnosticsEditor` is not and everything seems to be working on
-    // ToolbarControls?
-    pub fn stop_cargo_diagnostics_fetch(&mut self, cx: &mut App) {
+    pub(crate) fn stop_cargo_diagnostics_fetch(&mut self, cx: &mut App) {
         self.cargo_diagnostics_fetch.fetch_task = None;
         let mut cancel_gasks = Vec::new();
         for buffer_path in std::mem::take(&mut self.cargo_diagnostics_fetch.diagnostic_sources)
@@ -438,10 +433,9 @@ impl BufferDiagnosticsEditor {
         }));
     }
 
-    // TODO: Refactor this, since there's only a single project path, we can
-    // probably fetch its buffer and not actually need to have
-    // `update_stale_excerpts`, `update_all_excerpts` and `update_excerpts`.
-    fn update_stale_excerpts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Enqueue an update to the excerpts and diagnostic blocks being shown in
+    /// the editor.
+    pub(crate) fn update_all_excerpts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // If there's already a task updating the excerpts, early return and let
         // the other task finish.
         if self.update_excerpts_task.is_some() {
@@ -478,19 +472,6 @@ impl BufferDiagnosticsEditor {
 
             Ok(())
         }));
-    }
-
-    /// Enqueue an update of all excerpts. Updates all paths that either have
-    /// diagnostics or are currently present in this view to ensure that new
-    /// diagnostics are added and that excerpts that are shown but no longer
-    /// have diagnostics are removed from the editor.
-    /// TODO: Update this to only deal with the active file path, we don't need
-    /// to iterate over all paths, as this view is meant to only deal with a
-    /// single file.
-    /// TODO: Update this to behave like the regular `ProjectDiagnosticsEditor`
-    /// and run this in a background task with `update_stale_excerpts`.
-    pub fn update_all_excerpts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.update_stale_excerpts(window, cx);
     }
 
     /// Updates the excerpts in the `BufferDiagnosticsEditor` for a single
@@ -568,24 +549,27 @@ impl BufferDiagnosticsEditor {
                     )
                 })?;
 
-                // TODO: What's happening here? Is there a way to write this in
-                // a cleaner way?
+                // For each of the diagnostic blocks to be displayed in the
+                // editor, figure out its index in the list of blocks.
+                //
+                // The following rules are used to determine the order:
+                // 1. Blocks with a lower start position should come first.
+                // 2. If two blocks have the same start position, the one with
+                // the higher end position should come first.
                 for diagnostic_block in diagnostic_blocks {
-                    let index = blocks
-                        .binary_search_by(|probe| {
-                            probe
-                                .initial_range
-                                .start
-                                .cmp(&diagnostic_block.initial_range.start)
-                                .then(
-                                    probe
-                                        .initial_range
-                                        .end
-                                        .cmp(&diagnostic_block.initial_range.end),
-                                )
-                                .then(Ordering::Greater)
-                        })
-                        .unwrap_or_else(|index| index);
+                    let index = blocks.partition_point(|probe| {
+                        match probe
+                            .initial_range
+                            .start
+                            .cmp(&diagnostic_block.initial_range.start)
+                        {
+                            Ordering::Less => true,
+                            Ordering::Greater => false,
+                            Ordering::Equal => {
+                                probe.initial_range.end > diagnostic_block.initial_range.end
+                            }
+                        }
+                    });
 
                     blocks.insert(index, diagnostic_block);
                 }
@@ -607,8 +591,6 @@ impl BufferDiagnosticsEditor {
                 )
                 .await;
 
-                // TODO: Do we actually need to do this if we just did it for
-                // the diagnostic blocks? Shouldn't this already be sorted?
                 let index = excerpt_ranges
                     .binary_search_by(|probe| {
                         probe
@@ -663,9 +645,6 @@ impl BufferDiagnosticsEditor {
                             )
                         });
 
-                // TODO: If the multibuffer was empty before the excerpt ranges
-                // were updated, update the editor's selections to the first
-                // excerpt range.
                 if was_empty {
                     if let Some(anchor_range) = anchor_ranges.first() {
                         let range_to_select = anchor_range.start..anchor_range.start;
@@ -780,9 +759,11 @@ impl DiagnosticsEditor for BufferDiagnosticsEditor {
         _buffer_id: BufferId,
         _cx: &App,
     ) -> Vec<DiagnosticEntry<Anchor>> {
-        // TODO: We should probably save the ID of the buffer that the buffer
-        // diagnostics editor is working with, so that, if it doesn't match the
-        // argument, we can return an empty vector.
+        // Not sure if possible, as currently there shouldn't be a way for this
+        // method to be called for a buffer other than the one the
+        // `BufferDiagnosticsEditor` is working with, but we should probably
+        // save the ID of the buffer that it is working with, so that, if it
+        // doesn't match the argument, we can return an empty vector.
         self.diagnostics.clone()
     }
 }
