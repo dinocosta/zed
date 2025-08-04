@@ -18,37 +18,52 @@ use ui::{
 };
 use util::maybe;
 
-pub trait DiagnosticsEditor: 'static {
+use crate::ProjectDiagnosticsEditor;
+use crate::buffer_diagnostics::BufferDiagnosticsEditor;
+
+#[derive(Clone)]
+pub(crate) enum DiagnosticsEditorHandle {
+    Project(WeakEntity<ProjectDiagnosticsEditor>),
+    Buffer(WeakEntity<BufferDiagnosticsEditor>),
+}
+
+impl DiagnosticsEditorHandle {
     fn get_diagnostics_for_buffer(
         &self,
         buffer_id: BufferId,
         cx: &App,
-    ) -> Vec<DiagnosticEntry<text::Anchor>>;
-}
-
-/// Represents the absence of a diagnostics editor when determining the
-/// diagnostics block for a group.
-pub struct NoDiagnosticsEditor;
-
-impl DiagnosticsEditor for NoDiagnosticsEditor {
-    fn get_diagnostics_for_buffer(
-        &self,
-        _buffer_id: BufferId,
-        _cx: &App,
     ) -> Vec<DiagnosticEntry<text::Anchor>> {
-        vec![]
+        match self {
+            // Not sure if possible, as currently there shouldn't be a way for this
+            // method to be called for a buffer other than the one the
+            // `BufferDiagnosticsEditor` is working with, but we should probably
+            // save the ID of the buffer that it is working with, so that, if it
+            // doesn't match the argument, we can return an empty vector.
+            Self::Buffer(editor) => editor
+                .read_with(cx, |editor, _cx| editor.diagnostics.clone())
+                .unwrap_or(vec![]),
+            Self::Project(editor) => editor
+                .read_with(cx, |editor, _cx| {
+                    editor
+                        .diagnostics
+                        .get(&buffer_id)
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .unwrap_or(vec![]),
+        }
     }
 }
 
 pub struct DiagnosticRenderer;
 
 impl DiagnosticRenderer {
-    pub fn diagnostic_blocks_for_group<T: DiagnosticsEditor>(
+    pub fn diagnostic_blocks_for_group(
         diagnostic_group: Vec<DiagnosticEntry<Point>>,
         buffer_id: BufferId,
-        diagnostics_editor: Option<WeakEntity<T>>,
+        diagnostics_editor: Option<DiagnosticsEditorHandle>,
         cx: &mut App,
-    ) -> Vec<DiagnosticBlock<T>> {
+    ) -> Vec<DiagnosticBlock> {
         let Some(primary_ix) = diagnostic_group
             .iter()
             .position(|d| d.diagnostic.is_primary)
@@ -149,12 +164,7 @@ impl editor::DiagnosticRenderer for DiagnosticRenderer {
         editor: WeakEntity<Editor>,
         cx: &mut App,
     ) -> Vec<BlockProperties<Anchor>> {
-        let blocks = Self::diagnostic_blocks_for_group::<NoDiagnosticsEditor>(
-            diagnostic_group,
-            buffer_id,
-            None,
-            cx,
-        );
+        let blocks = Self::diagnostic_blocks_for_group(diagnostic_group, buffer_id, None, cx);
 
         blocks
             .into_iter()
@@ -182,12 +192,7 @@ impl editor::DiagnosticRenderer for DiagnosticRenderer {
         buffer_id: BufferId,
         cx: &mut App,
     ) -> Option<Entity<Markdown>> {
-        let blocks = Self::diagnostic_blocks_for_group::<NoDiagnosticsEditor>(
-            diagnostic_group,
-            buffer_id,
-            None,
-            cx,
-        );
+        let blocks = Self::diagnostic_blocks_for_group(diagnostic_group, buffer_id, None, cx);
         blocks.into_iter().find_map(|block| {
             if block.initial_range == range {
                 Some(block.markdown)
@@ -204,19 +209,19 @@ impl editor::DiagnosticRenderer for DiagnosticRenderer {
         window: &mut Window,
         cx: &mut Context<Editor>,
     ) {
-        DiagnosticBlock::<NoDiagnosticsEditor>::open_link(editor, &None, link, window, cx);
+        DiagnosticBlock::open_link(editor, &None, link, window, cx);
     }
 }
 
 #[derive(Clone)]
-pub(crate) struct DiagnosticBlock<T: DiagnosticsEditor> {
+pub(crate) struct DiagnosticBlock {
     pub(crate) initial_range: Range<Point>,
     pub(crate) severity: DiagnosticSeverity,
     pub(crate) markdown: Entity<Markdown>,
-    pub(crate) diagnostics_editor: Option<WeakEntity<T>>,
+    pub(crate) diagnostics_editor: Option<DiagnosticsEditorHandle>,
 }
 
-impl<T: DiagnosticsEditor> DiagnosticBlock<T> {
+impl DiagnosticBlock {
     pub fn render_block(&self, editor: WeakEntity<Editor>, bcx: &BlockContext) -> AnyElement {
         let cx = &bcx.app;
         let status_colors = bcx.app.theme().status();
@@ -264,7 +269,7 @@ impl<T: DiagnosticsEditor> DiagnosticBlock<T> {
 
     pub fn open_link(
         editor: &mut Editor,
-        diagnostics_editor: &Option<WeakEntity<T>>,
+        diagnostics_editor: &Option<DiagnosticsEditorHandle>,
         link: SharedString,
         window: &mut Window,
         cx: &mut Context<Editor>,
@@ -285,15 +290,10 @@ impl<T: DiagnosticsEditor> DiagnosticBlock<T> {
 
         if let Some(diagnostics_editor) = diagnostics_editor {
             if let Some(diagnostic) = diagnostics_editor
-                .read_with(cx, |diagnostics, _| {
-                    diagnostics
-                        .get_diagnostics_for_buffer(buffer_id, cx)
-                        .into_iter()
-                        .filter(|d| d.diagnostic.group_id == group_id)
-                        .nth(ix)
-                })
-                .ok()
-                .flatten()
+                .get_diagnostics_for_buffer(buffer_id, cx)
+                .into_iter()
+                .filter(|d| d.diagnostic.group_id == group_id)
+                .nth(ix)
             {
                 let multibuffer = editor.buffer().read(cx);
                 let Some(snapshot) = multibuffer
