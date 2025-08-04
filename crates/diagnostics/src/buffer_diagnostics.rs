@@ -192,6 +192,14 @@ impl BufferDiagnosticsEditor {
         })
         .detach();
 
+        // Ensure that, when `BufferDiagnosticsEditor` is dropped, the
+        // background task responsible for fetching diagnostics is stopped, as
+        // its value will no longer be needed.
+        cx.observe_release(&cx.entity(), |editor, _, cx| {
+            editor.stop_cargo_diagnostics_fetch(cx);
+        })
+        .detach();
+
         let project = project_handle.clone();
         let focus_handle = cx.focus_handle();
 
