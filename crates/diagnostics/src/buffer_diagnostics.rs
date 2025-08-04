@@ -6,7 +6,7 @@ use crate::ToggleWarnings;
 use crate::context_range_for_entry;
 use crate::diagnostic_renderer::DiagnosticBlock;
 use crate::diagnostic_renderer::DiagnosticRenderer;
-use crate::diagnostic_renderer::DiagnosticsEditor;
+use crate::diagnostic_renderer::DiagnosticsEditorHandle;
 use anyhow::Result;
 use collections::HashMap;
 use editor::DEFAULT_MULTIBUFFER_CONTEXT;
@@ -40,7 +40,6 @@ use gpui::Window;
 use gpui::actions;
 use gpui::div;
 use language::Buffer;
-use language::BufferId;
 use language::DiagnosticEntry;
 use language::Point;
 use project::DiagnosticSummary;
@@ -89,7 +88,7 @@ pub(crate) struct BufferDiagnosticsEditor {
     /// The current diagnostic entries in the `BufferDiagnosticsEditor`. Used to
     /// allow quick comparison of updated diagnostics, to confirm if anything
     /// has changed.
-    diagnostics: Vec<DiagnosticEntry<Anchor>>,
+    pub(crate) diagnostics: Vec<DiagnosticEntry<Anchor>>,
     /// The blocks used to display the diagnostics' content in the editor, next
     /// to the excerpts where the diagnostic originated.
     blocks: Vec<CustomBlockId>,
@@ -103,16 +102,16 @@ pub(crate) struct BufferDiagnosticsEditor {
     summary: DiagnosticSummary,
     /// Whether to include warnings in the list of diagnostics shown in the
     /// editor.
-    pub include_warnings: bool,
+    pub(crate) include_warnings: bool,
     /// Keeps track of whether there's a background task already running to
     /// update the excerpts, in order to avoid firing multiple tasks for this purpose.
-    pub update_excerpts_task: Option<Task<Result<()>>>,
+    pub(crate) update_excerpts_task: Option<Task<Result<()>>>,
     /// Keeps track of the task responsible for updating the
     /// `BufferDiagnosticsEditor`'s diagnostic summary.
     diagnostic_summary_task: Task<()>,
     /// Tracks the state of fetching cargo diagnostics, including any running
     /// fetch tasks and the diagnostic sources being processed.
-    pub cargo_diagnostics_fetch: CargoDiagnosticsFetchState,
+    pub(crate) cargo_diagnostics_fetch: CargoDiagnosticsFetchState,
     /// The project's subscription, responsible for processing events related to
     /// diagnostics.
     _subscription: Subscription,
@@ -526,7 +525,7 @@ impl BufferDiagnosticsEditor {
                     })
             }
 
-            let mut blocks: Vec<DiagnosticBlock<BufferDiagnosticsEditor>> = Vec::new();
+            let mut blocks: Vec<DiagnosticBlock> = Vec::new();
             for (_, group) in grouped {
                 // If the minimum severity of the group is higher than the
                 // maximum severity, or it doesn't even have severity, skip this
@@ -544,7 +543,9 @@ impl BufferDiagnosticsEditor {
                     DiagnosticRenderer::diagnostic_blocks_for_group(
                         group,
                         buffer_snapshot.remote_id(),
-                        Some(buffer_diagnostics_editor.clone()),
+                        Some(DiagnosticsEditorHandle::Buffer(
+                            buffer_diagnostics_editor.clone(),
+                        )),
                         cx,
                     )
                 })?;
@@ -750,21 +751,6 @@ impl BufferDiagnosticsEditor {
             true => DiagnosticSeverity::Warning,
             false => DiagnosticSeverity::Error,
         }
-    }
-}
-
-impl DiagnosticsEditor for BufferDiagnosticsEditor {
-    fn get_diagnostics_for_buffer(
-        &self,
-        _buffer_id: BufferId,
-        _cx: &App,
-    ) -> Vec<DiagnosticEntry<Anchor>> {
-        // Not sure if possible, as currently there shouldn't be a way for this
-        // method to be called for a buffer other than the one the
-        // `BufferDiagnosticsEditor` is working with, but we should probably
-        // save the ID of the buffer that it is working with, so that, if it
-        // doesn't match the argument, we can return an empty vector.
-        self.diagnostics.clone()
     }
 }
 

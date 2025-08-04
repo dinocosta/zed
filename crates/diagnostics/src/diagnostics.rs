@@ -11,7 +11,6 @@ use anyhow::Result;
 use buffer_diagnostics::BufferDiagnosticsEditor;
 use collections::{BTreeSet, HashMap};
 use diagnostic_renderer::DiagnosticBlock;
-use diagnostic_renderer::DiagnosticsEditor;
 use editor::{
     DEFAULT_MULTIBUFFER_CONTEXT, Editor, EditorEvent, ExcerptRange, MultiBuffer, PathKey,
     display_map::{BlockPlacement, BlockProperties, BlockStyle, CustomBlockId},
@@ -38,7 +37,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use text::{Anchor, BufferId, OffsetRangeExt};
+use text::{BufferId, OffsetRangeExt};
 use theme::ActiveTheme;
 pub use toolbar_controls::ToolbarControls;
 use ui::{Icon, IconName, Label, h_flex, prelude::*};
@@ -48,6 +47,8 @@ use workspace::{
     item::{BreadcrumbText, Item, ItemEvent, ItemHandle, SaveOptions, TabContentParams},
     searchable::SearchableItemHandle,
 };
+
+use crate::diagnostic_renderer::DiagnosticsEditorHandle;
 
 actions!(
     diagnostics,
@@ -576,7 +577,7 @@ impl ProjectDiagnosticsEditor {
                         diagnostic: entry.diagnostic,
                     })
             }
-            let mut blocks: Vec<DiagnosticBlock<Self>> = Vec::new();
+            let mut blocks: Vec<DiagnosticBlock> = Vec::new();
 
             for (_, group) in grouped {
                 let group_severity = group.iter().map(|d| d.diagnostic.severity).min();
@@ -587,7 +588,7 @@ impl ProjectDiagnosticsEditor {
                     crate::diagnostic_renderer::DiagnosticRenderer::diagnostic_blocks_for_group(
                         group,
                         buffer_snapshot.remote_id(),
-                        Some(this.clone()),
+                        Some(DiagnosticsEditorHandle::Project(this.clone())),
                         cx,
                     )
                 })?;
@@ -747,19 +748,6 @@ impl ProjectDiagnosticsEditor {
                 self.project.read(cx).path_for_entry(rust_file_entry.id, cx)
             })
             .collect()
-    }
-}
-
-impl DiagnosticsEditor for ProjectDiagnosticsEditor {
-    fn get_diagnostics_for_buffer(
-        &self,
-        buffer_id: BufferId,
-        _cx: &App,
-    ) -> Vec<DiagnosticEntry<Anchor>> {
-        self.diagnostics
-            .get(&buffer_id)
-            .cloned()
-            .unwrap_or_default()
     }
 }
 
