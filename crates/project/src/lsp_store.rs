@@ -7188,20 +7188,18 @@ impl LspStore {
     pub fn diagnostic_summary_for_path(
         &self,
         project_path: &ProjectPath,
-        include_ignored: bool,
-        cx: &App,
+        _: &App,
     ) -> DiagnosticSummary {
-        match self
-            .diagnostic_summaries(include_ignored, cx)
-            .find(|(path, _, _)| path == project_path)
-        {
-            Some((_, _, diagnostic_summary)) => diagnostic_summary,
-            None => DiagnosticSummary::default(),
-        }
+        // TODO: If there's multiple `DiagnosticSummary` but for
+        // different language servers, which one should be returned?
+        self.diagnostic_summaries
+            .get(&project_path.worktree_id)
+            .and_then(|map| map.get(&project_path.path))
+            .and_then(|summaries| summaries.iter().next())
+            .map(|(_language_server_id, summary)| summary.clone())
+            .unwrap_or_default()
     }
 
-    /// When `path_matcher` is provided, only diagnostics for matching paths
-    /// will be included.
     pub fn diagnostic_summaries<'a>(
         &'a self,
         include_ignored: bool,

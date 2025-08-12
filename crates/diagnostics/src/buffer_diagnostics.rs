@@ -1,6 +1,6 @@
 use crate::{
-    CargoDiagnosticsFetchState, DIAGNOSTICS_SUMMARY_UPDATE_DELAY, DIAGNOSTICS_UPDATE_DELAY,
-    IncludeWarnings, ToggleWarnings, context_range_for_entry,
+    CargoDiagnosticsFetchState, DIAGNOSTICS_UPDATE_DELAY, IncludeWarnings, ToggleWarnings,
+    context_range_for_entry,
     diagnostic_renderer::{DiagnosticBlock, DiagnosticRenderer, DiagnosticsEditorHandle},
 };
 use anyhow::Result;
@@ -67,9 +67,6 @@ pub(crate) struct BufferDiagnosticsEditor {
     /// Keeps track of whether there's a background task already running to
     /// update the excerpts, in order to avoid firing multiple tasks for this purpose.
     pub(crate) update_excerpts_task: Option<Task<Result<()>>>,
-    /// Keeps track of the task responsible for updating the
-    /// `BufferDiagnosticsEditor`'s diagnostic summary.
-    diagnostic_summary_task: Task<()>,
     /// Tracks the state of fetching cargo diagnostics, including any running
     /// fetch tasks and the diagnostic sources being processed.
     pub(crate) cargo_diagnostics_fetch: CargoDiagnosticsFetchState,
@@ -108,19 +105,7 @@ impl BufferDiagnosticsEditor {
                     // `BufferDiagnosticsEditor` should update its state only if
                     // the path matches its `project_path`, otherwise the event should be ignored.
                     if *path == buffer_diagnostics_editor.project_path {
-                        // Start a task to update the diagnostic summary.
-                        buffer_diagnostics_editor.diagnostic_summary_task =
-                            cx.spawn(async move |buffer_diagnostics_editor, cx| {
-                                cx.background_executor()
-                                    .timer(DIAGNOSTICS_SUMMARY_UPDATE_DELAY)
-                                    .await;
-
-                                buffer_diagnostics_editor
-                                    .update(cx, |buffer_diagnostics_editor, cx| {
-                                        buffer_diagnostics_editor.update_diagnostic_summary(cx);
-                                    })
-                                    .log_err();
-                            });
+                        buffer_diagnostics_editor.update_diagnostic_summary(cx);
 
                         if buffer_diagnostics_editor.editor.focus_handle(cx).contains_focused(window, cx) || buffer_diagnostics_editor.focus_handle.contains_focused(window, cx) {
                             log::debug!("diagnostics updated for server {language_server_id}, path {path:?}. recording change");
@@ -163,7 +148,7 @@ impl BufferDiagnosticsEditor {
 
         let summary = project_handle
             .read(cx)
-            .diagnostic_summary_for_path(&project_path, false, cx);
+            .diagnostic_summary_for_path(&project_path, cx);
 
         let multibuffer = cx.new(|cx| MultiBuffer::new(project_handle.read(cx).capability()));
         let max_severity = Self::max_diagnostics_severity(include_warnings);
@@ -209,7 +194,6 @@ impl BufferDiagnosticsEditor {
 
         let diagnostics = vec![];
         let update_excerpts_task = None;
-        let diagnostic_summary_task = Task::ready(());
         let cargo_diagnostics_fetch: CargoDiagnosticsFetchState = Default::default();
         let mut buffer_diagnostics_editor = Self {
             project,
@@ -222,7 +206,6 @@ impl BufferDiagnosticsEditor {
             summary,
             include_warnings,
             update_excerpts_task,
-            diagnostic_summary_task,
             cargo_diagnostics_fetch,
             _subscription: project_event_subscription,
         };
@@ -301,7 +284,7 @@ impl BufferDiagnosticsEditor {
     fn update_diagnostic_summary(&mut self, cx: &mut Context<Self>) {
         let project = self.project.read(cx);
 
-        self.summary = project.diagnostic_summary_for_path(&self.project_path, false, cx);
+        self.summary = project.diagnostic_summary_for_path(&self.project_path, cx);
     }
 
     pub(crate) fn cargo_diagnostics_sources(&self, cx: &App) -> Vec<ProjectPath> {
