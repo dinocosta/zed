@@ -1,74 +1,35 @@
-use crate::CargoDiagnosticsFetchState;
-use crate::DIAGNOSTICS_SUMMARY_UPDATE_DELAY;
-use crate::DIAGNOSTICS_UPDATE_DELAY;
-use crate::IncludeWarnings;
-use crate::ToggleWarnings;
-use crate::context_range_for_entry;
-use crate::diagnostic_renderer::DiagnosticBlock;
-use crate::diagnostic_renderer::DiagnosticRenderer;
-use crate::diagnostic_renderer::DiagnosticsEditorHandle;
+use crate::{
+    CargoDiagnosticsFetchState, DIAGNOSTICS_SUMMARY_UPDATE_DELAY, DIAGNOSTICS_UPDATE_DELAY,
+    IncludeWarnings, ToggleWarnings, context_range_for_entry,
+    diagnostic_renderer::{DiagnosticBlock, DiagnosticRenderer, DiagnosticsEditorHandle},
+};
 use anyhow::Result;
 use collections::HashMap;
-use editor::DEFAULT_MULTIBUFFER_CONTEXT;
-use editor::Editor;
-use editor::EditorEvent;
-use editor::ExcerptRange;
-use editor::MultiBuffer;
-use editor::PathKey;
-use editor::display_map::BlockPlacement;
-use editor::display_map::BlockProperties;
-use editor::display_map::BlockStyle;
-use editor::display_map::CustomBlockId;
+use editor::{
+    DEFAULT_MULTIBUFFER_CONTEXT, Editor, EditorEvent, ExcerptRange, MultiBuffer, PathKey,
+    display_map::{BlockPlacement, BlockProperties, BlockStyle, CustomBlockId},
+};
 use futures::future::join_all;
-use gpui::AnyElement;
-use gpui::App;
-use gpui::AppContext;
-use gpui::Context;
-use gpui::Entity;
-use gpui::EventEmitter;
-use gpui::FocusHandle;
-use gpui::Focusable;
-use gpui::InteractiveElement;
-use gpui::IntoElement;
-use gpui::ParentElement;
-use gpui::Render;
-use gpui::SharedString;
-use gpui::Styled;
-use gpui::Subscription;
-use gpui::Task;
-use gpui::Window;
-use gpui::actions;
-use gpui::div;
-use language::Buffer;
-use language::DiagnosticEntry;
-use language::Point;
-use project::DiagnosticSummary;
-use project::Event;
-use project::Project;
-use project::ProjectPath;
-use project::lsp_store::rust_analyzer_ext::cancel_flycheck;
-use project::lsp_store::rust_analyzer_ext::run_flycheck;
-use project::project_settings::DiagnosticSeverity;
-use project::project_settings::ProjectSettings;
+use gpui::{
+    AnyElement, App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Subscription,
+    Task, Window, actions, div,
+};
+use language::{Buffer, DiagnosticEntry, Point};
+use project::{
+    DiagnosticSummary, Event, Project, ProjectPath,
+    lsp_store::rust_analyzer_ext::{cancel_flycheck, run_flycheck},
+    project_settings::{DiagnosticSeverity, ProjectSettings},
+};
 use settings::Settings;
-use std::cmp::Ordering;
-use std::sync::Arc;
-use text::Anchor;
-use text::BufferSnapshot;
-use text::OffsetRangeExt;
-use ui::Icon;
-use ui::IconName;
-use ui::Label;
-use ui::h_flex;
-use ui::prelude::*;
-use util::ResultExt;
-use util::paths::PathExt;
-use workspace::ItemHandle;
-use workspace::ToolbarItemLocation;
-use workspace::Workspace;
-use workspace::item::BreadcrumbText;
-use workspace::item::Item;
-use workspace::item::TabContentParams;
+use std::{cmp::Ordering, sync::Arc};
+use text::{Anchor, BufferSnapshot, OffsetRangeExt};
+use ui::{Icon, IconName, Label, h_flex, prelude::*};
+use util::{ResultExt, paths::PathExt};
+use workspace::{
+    ItemHandle, ToolbarItemLocation, Workspace,
+    item::{BreadcrumbText, Item, TabContentParams},
+};
 
 actions!(
     diagnostics,
@@ -172,25 +133,6 @@ impl BufferDiagnosticsEditor {
                 _ => {}
             },
         );
-
-        // Whenever the `IncludeWarnings` setting changes, update the
-        // `include_warnings` field, update the associated editor's
-        // `max_diagnostics_severity` accordingly as well as the diagnostics and
-        // excerpts, ensuring that the warnings are correctly included or
-        // excluded from the summary and excerpts.
-        cx.observe_global_in::<IncludeWarnings>(window, |buffer_diagnostics_editor, window, cx| {
-            let include_warnings = cx.global::<IncludeWarnings>().0;
-            let max_severity = Self::max_diagnostics_severity(include_warnings);
-
-            buffer_diagnostics_editor.include_warnings = include_warnings;
-            buffer_diagnostics_editor.editor.update(cx, |editor, cx| {
-                editor.set_max_diagnostics_severity(max_severity, cx);
-            });
-
-            buffer_diagnostics_editor.diagnostics.clear();
-            buffer_diagnostics_editor.update_all_diagnostics(false, window, cx);
-        })
-        .detach();
 
         // Ensure that, when `BufferDiagnosticsEditor` is dropped, the
         // background task responsible for fetching diagnostics is stopped, as
@@ -750,8 +692,22 @@ impl BufferDiagnosticsEditor {
         }
     }
 
-    pub fn toggle_warnings(&mut self, _: &ToggleWarnings, _: &mut Window, cx: &mut Context<Self>) {
-        cx.set_global(IncludeWarnings(!self.include_warnings));
+    pub fn toggle_warnings(
+        &mut self,
+        _: &ToggleWarnings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let include_warnings = !self.include_warnings;
+        let max_severity = Self::max_diagnostics_severity(include_warnings);
+
+        self.editor.update(cx, |editor, cx| {
+            editor.set_max_diagnostics_severity(max_severity, cx);
+        });
+
+        self.include_warnings = include_warnings;
+        self.diagnostics.clear();
+        self.update_all_diagnostics(false, window, cx);
     }
 
     fn max_diagnostics_severity(include_warnings: bool) -> DiagnosticSeverity {
