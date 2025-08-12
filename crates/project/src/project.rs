@@ -4315,15 +4315,10 @@ impl Project {
     }
 
     /// Returns a summary of the diagnostics for the provided project path only.
-    pub fn diagnostic_summary_for_path(
-        &self,
-        path: &ProjectPath,
-        include_ignored: bool,
-        cx: &App,
-    ) -> DiagnosticSummary {
+    pub fn diagnostic_summary_for_path(&self, path: &ProjectPath, cx: &App) -> DiagnosticSummary {
         self.lsp_store
             .read(cx)
-            .diagnostic_summary_for_path(path, include_ignored, cx)
+            .diagnostic_summary_for_path(path, cx)
     }
 
     pub fn diagnostic_summaries<'a>(
