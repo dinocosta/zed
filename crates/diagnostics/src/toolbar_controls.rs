@@ -19,8 +19,6 @@ impl DiagnosticsEditorHandle {}
 
 impl Render for ToolbarControls {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Not sure what the default value should be here, due to the `None` case, where not editor is
-        // associated with the toolbar controls?
         let mut has_stale_excerpts = false;
         let mut include_warnings = false;
         let mut is_updating = false;
