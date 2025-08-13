@@ -1,6 +1,5 @@
 use crate::{
-    CargoDiagnosticsFetchState, DIAGNOSTICS_UPDATE_DELAY, IncludeWarnings, ToggleWarnings,
-    context_range_for_entry,
+    DIAGNOSTICS_UPDATE_DELAY, IncludeWarnings, ToggleWarnings, context_range_for_entry,
     diagnostic_renderer::{DiagnosticBlock, DiagnosticRenderer, DiagnosticsEditorHandle},
 };
 use anyhow::Result;
@@ -9,7 +8,6 @@ use editor::{
     DEFAULT_MULTIBUFFER_CONTEXT, Editor, EditorEvent, ExcerptRange, MultiBuffer, PathKey,
     display_map::{BlockPlacement, BlockProperties, BlockStyle, CustomBlockId},
 };
-use futures::future::join_all;
 use gpui::{
     AnyElement, App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Subscription,
@@ -18,7 +16,6 @@ use gpui::{
 use language::{Buffer, DiagnosticEntry, Point};
 use project::{
     DiagnosticSummary, Event, Project, ProjectPath,
-    lsp_store::rust_analyzer_ext::{cancel_flycheck, run_flycheck},
     project_settings::{DiagnosticSeverity, ProjectSettings},
 };
 use settings::Settings;
@@ -67,9 +64,6 @@ pub(crate) struct BufferDiagnosticsEditor {
     /// Keeps track of whether there's a background task already running to
     /// update the excerpts, in order to avoid firing multiple tasks for this purpose.
     pub(crate) update_excerpts_task: Option<Task<Result<()>>>,
-    /// Tracks the state of fetching cargo diagnostics, including any running
-    /// fetch tasks and the diagnostic sources being processed.
-    pub(crate) cargo_diagnostics_fetch: CargoDiagnosticsFetchState,
     /// The project's subscription, responsible for processing events related to
     /// diagnostics.
     _subscription: Subscription,
@@ -118,14 +112,6 @@ impl BufferDiagnosticsEditor {
                 _ => {}
             },
         );
-
-        // Ensure that, when `BufferDiagnosticsEditor` is dropped, the
-        // background task responsible for fetching diagnostics is stopped, as
-        // its value will no longer be needed.
-        cx.observe_release(&cx.entity(), |editor, _, cx| {
-            editor.stop_cargo_diagnostics_fetch(cx);
-        })
-        .detach();
 
         let project = project_handle.clone();
         let focus_handle = cx.focus_handle();
@@ -194,7 +180,6 @@ impl BufferDiagnosticsEditor {
 
         let diagnostics = vec![];
         let update_excerpts_task = None;
-        let cargo_diagnostics_fetch: CargoDiagnosticsFetchState = Default::default();
         let mut buffer_diagnostics_editor = Self {
             project,
             focus_handle,
@@ -206,11 +191,10 @@ impl BufferDiagnosticsEditor {
             summary,
             include_warnings,
             update_excerpts_task,
-            cargo_diagnostics_fetch,
             _subscription: project_event_subscription,
         };
 
-        buffer_diagnostics_editor.update_all_diagnostics(true, window, cx);
+        buffer_diagnostics_editor.update_all_diagnostics(window, cx);
         buffer_diagnostics_editor
     }
 
@@ -266,103 +250,14 @@ impl BufferDiagnosticsEditor {
         workspace.register_action(Self::deploy);
     }
 
-    fn update_all_diagnostics(
-        &mut self,
-        first_launch: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let cargo_diagnostics_sources = self.cargo_diagnostics_sources(cx);
-
-        if cargo_diagnostics_sources.is_empty() || (first_launch && !self.summary.is_empty()) {
-            self.update_all_excerpts(window, cx);
-        } else {
-            self.fetch_cargo_diagnostics(Arc::new(cargo_diagnostics_sources), cx);
-        }
+    fn update_all_diagnostics(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.update_all_excerpts(window, cx);
     }
 
     fn update_diagnostic_summary(&mut self, cx: &mut Context<Self>) {
         let project = self.project.read(cx);
 
         self.summary = project.diagnostic_summary_for_path(&self.project_path, cx);
-    }
-
-    pub(crate) fn cargo_diagnostics_sources(&self, cx: &App) -> Vec<ProjectPath> {
-        let fetch_cargo_diagnostics = ProjectSettings::get_global(cx)
-            .diagnostics
-            .fetch_cargo_diagnostics();
-
-        if !fetch_cargo_diagnostics {
-            return Vec::new();
-        }
-
-        self.project
-            .read(cx)
-            .worktrees(cx)
-            .filter_map(|worktree| {
-                let rust_file_entry = worktree.read(cx).entries(false, 0).find(|entry| {
-                    entry
-                        .path
-                        .extension()
-                        .and_then(|extension| extension.to_str())
-                        == Some("rs")
-                })?;
-
-                self.project.read(cx).path_for_entry(rust_file_entry.id, cx)
-            })
-            .collect()
-    }
-
-    pub fn fetch_cargo_diagnostics(
-        &mut self,
-        diagnostics_sources: Arc<Vec<ProjectPath>>,
-        cx: &mut Context<Self>,
-    ) {
-        let project = self.project.clone();
-        self.cargo_diagnostics_fetch.cancel_task = None;
-        self.cargo_diagnostics_fetch.fetch_task = None;
-        self.cargo_diagnostics_fetch.diagnostic_sources = diagnostics_sources.clone();
-
-        if self.cargo_diagnostics_fetch.diagnostic_sources.is_empty() {
-            return;
-        }
-
-        self.cargo_diagnostics_fetch.fetch_task = Some(cx.spawn(async move |editor, cx| {
-            let mut fetch_tasks = Vec::new();
-            for buffer_path in diagnostics_sources.iter().cloned() {
-                if cx
-                    .update(|cx| {
-                        fetch_tasks.push(run_flycheck(project.clone(), buffer_path, cx));
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-
-            let _ = join_all(fetch_tasks).await;
-            editor
-                .update(cx, |editor, _| {
-                    editor.cargo_diagnostics_fetch.fetch_task = None;
-                })
-                .ok();
-        }));
-    }
-
-    pub(crate) fn stop_cargo_diagnostics_fetch(&mut self, cx: &mut App) {
-        self.cargo_diagnostics_fetch.fetch_task = None;
-        let mut cancel_gasks = Vec::new();
-        for buffer_path in std::mem::take(&mut self.cargo_diagnostics_fetch.diagnostic_sources)
-            .iter()
-            .cloned()
-        {
-            cancel_gasks.push(cancel_flycheck(self.project.clone(), buffer_path, cx));
-        }
-
-        self.cargo_diagnostics_fetch.cancel_task = Some(cx.background_spawn(async move {
-            let _ = join_all(cancel_gasks).await;
-            log::info!("Finished fetching cargo diagnostics");
-        }));
     }
 
     /// Enqueue an update to the excerpts and diagnostic blocks being shown in
@@ -690,7 +585,7 @@ impl BufferDiagnosticsEditor {
 
         self.include_warnings = include_warnings;
         self.diagnostics.clear();
-        self.update_all_diagnostics(false, window, cx);
+        self.update_all_diagnostics(window, cx);
     }
 
     fn max_diagnostics_severity(include_warnings: bool) -> DiagnosticSeverity {

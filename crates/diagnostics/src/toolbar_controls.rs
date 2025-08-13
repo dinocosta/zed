@@ -50,8 +50,7 @@ impl Render for ToolbarControls {
                     // there are any updates to the diagnostics for the path and
                     // mark that instead of automatically updating?
                     has_stale_excerpts = false;
-                    is_updating = diagnostics.cargo_diagnostics_fetch.fetch_task.is_some()
-                        || diagnostics.update_excerpts_task.is_some()
+                    is_updating = diagnostics.update_excerpts_task.is_some()
                         || diagnostics
                             .project
                             .read(cx)
@@ -98,8 +97,6 @@ impl Render for ToolbarControls {
                                         let _ = buffer_diagnostics_editor.update(
                                             cx,
                                             |buffer_diagnostics_editor, cx| {
-                                                buffer_diagnostics_editor
-                                                    .stop_cargo_diagnostics_fetch(cx);
                                                 buffer_diagnostics_editor.update_excerpts_task =
                                                     None;
                                                 cx.notify();
@@ -146,16 +143,8 @@ impl Render for ToolbarControls {
                                             let _ = buffer_diagnostics_editor.update(
                                                 cx,
                                                 |buffer_diagnostics_editor, cx| {
-                                                    if fetch_cargo_diagnostics {
-                                                        buffer_diagnostics_editor
-                                                            .fetch_cargo_diagnostics(
-                                                                cargo_diagnostics_sources,
-                                                                cx,
-                                                            );
-                                                    } else {
-                                                        buffer_diagnostics_editor
-                                                            .update_all_excerpts(window, cx);
-                                                    }
+                                                    buffer_diagnostics_editor
+                                                        .update_all_excerpts(window, cx);
                                                 },
                                             );
                                         }
