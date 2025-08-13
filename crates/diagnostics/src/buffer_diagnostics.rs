@@ -21,7 +21,7 @@ use project::{
 use settings::Settings;
 use std::{cmp::Ordering, sync::Arc};
 use text::{Anchor, BufferSnapshot, OffsetRangeExt};
-use ui::{Icon, IconName, Label, h_flex, prelude::*};
+use ui::{Button, ButtonStyle, Icon, IconName, Label, Tooltip, h_flex, prelude::*};
 use util::{ResultExt, paths::PathExt};
 use workspace::{
     ItemHandle, ToolbarItemLocation, Workspace,
@@ -688,11 +688,10 @@ impl Render for BufferDiagnosticsEditor {
             false => 0,
         };
 
-        // No excerpts to be displayed.
         let child = if error_count + warning_count == 0 {
             let label = match warning_count {
-                0 => format!("No problems in {}", filename),
-                _ => format!("No errors in {}", filename),
+                0 => "No problems in",
+                _ => "No errors in",
             };
 
             v_flex()
@@ -703,7 +702,31 @@ impl Render for BufferDiagnosticsEditor {
                 .items_center()
                 .text_center()
                 .bg(cx.theme().colors().editor_background)
-                .child(Label::new(label).color(Color::Muted))
+                .child(
+                    div()
+                        .h_flex()
+                        .child(Label::new(label).color(Color::Muted))
+                        .child(
+                            Button::new("open-file", filename)
+                                .style(ButtonStyle::Transparent)
+                                .tooltip(Tooltip::text("Open File"))
+                                .on_click(cx.listener(|buffer_diagnostics, _, window, cx| {
+                                    if let Some(workspace) = window.root::<Workspace>().flatten() {
+                                        workspace.update(cx, |workspace, cx| {
+                                            workspace
+                                                .open_path(
+                                                    buffer_diagnostics.project_path.clone(),
+                                                    None,
+                                                    true,
+                                                    window,
+                                                    cx,
+                                                )
+                                                .detach_and_log_err(cx);
+                                        })
+                                    }
+                                })),
+                        ),
+                )
                 .when(self.summary.warning_count > 0, |div| {
                     let label = match self.summary.warning_count {
                         1 => "Show 1 warning".into(),
