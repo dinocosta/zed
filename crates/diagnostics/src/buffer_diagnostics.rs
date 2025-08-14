@@ -53,6 +53,9 @@ pub(crate) struct BufferDiagnosticsEditor {
     /// Multibuffer to contain all excerpts that contain diagnostics, which are
     /// to be rendered in the editor.
     multibuffer: Entity<MultiBuffer>,
+    /// The buffer for which the editor is displaying diagnostics and excerpts
+    /// for.
+    buffer: Option<Entity<Buffer>>,
     /// The path for which the editor is displaying diagnostics for.
     project_path: ProjectPath,
     /// Summary of the number of warnings and errors for the path. Used to
@@ -113,7 +116,6 @@ impl BufferDiagnosticsEditor {
             },
         );
 
-        let project = project_handle.clone();
         let focus_handle = cx.focus_handle();
 
         cx.on_focus_in(
@@ -180,13 +182,14 @@ impl BufferDiagnosticsEditor {
 
         let diagnostics = vec![];
         let update_excerpts_task = None;
-        let mut buffer_diagnostics_editor = Self {
-            project,
+        let buffer_diagnostics_editor = Self {
+            project: project_handle,
             focus_handle,
             editor,
             diagnostics,
             blocks: Default::default(),
             multibuffer,
+            buffer: None,
             project_path,
             summary,
             include_warnings,
@@ -194,7 +197,23 @@ impl BufferDiagnosticsEditor {
             _subscription: project_event_subscription,
         };
 
-        buffer_diagnostics_editor.update_all_diagnostics(window, cx);
+        let project = buffer_diagnostics_editor.project.clone();
+        let project_path = buffer_diagnostics_editor.project_path.clone();
+
+        cx.spawn_in(window, async move |editor, cx| {
+            let buffer = project
+                .update(cx, |project, cx| project.open_buffer(project_path, cx))?
+                .await
+                .log_err();
+
+            editor.update_in(cx, |editor, window, cx| {
+                editor.buffer = buffer;
+                editor.update_all_diagnostics(window, cx);
+                cx.notify();
+            })
+        })
+        .detach();
+
         buffer_diagnostics_editor
     }
 
@@ -237,7 +256,7 @@ impl BufferDiagnosticsEditor {
                     )
                 });
 
-                workspace.add_item_to_active_pane(Box::new(item), None, true, window, cx);
+                workspace.add_item_to_active_pane(Box::new(item.clone()), None, true, window, cx);
             }
         }
     }
@@ -269,20 +288,12 @@ impl BufferDiagnosticsEditor {
             return;
         }
 
-        let project_handle = self.project.clone();
-        let project_path = self.project_path.clone();
+        let buffer = self.buffer.clone();
 
         self.update_excerpts_task = Some(cx.spawn_in(window, async move |editor, cx| {
             cx.background_executor()
                 .timer(DIAGNOSTICS_UPDATE_DELAY)
                 .await;
-
-            let buffer = project_handle
-                .update(cx, |project, cx| {
-                    project.open_buffer(project_path.clone(), cx)
-                })?
-                .await
-                .log_err();
 
             if let Some(buffer) = buffer {
                 editor
@@ -290,12 +301,12 @@ impl BufferDiagnosticsEditor {
                         editor.update_excerpts(buffer, window, cx)
                     })?
                     .await?;
-
-                let _ = editor.update(cx, |editor, cx| {
-                    editor.update_excerpts_task = None;
-                    cx.notify();
-                });
             };
+
+            let _ = editor.update(cx, |editor, cx| {
+                editor.update_excerpts_task = None;
+                cx.notify();
+            });
 
             Ok(())
         }));
