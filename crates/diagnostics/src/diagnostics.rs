@@ -186,13 +186,7 @@ impl ProjectDiagnosticsEditor {
                     language_server_id,
                     paths,
                 } => {
-                    if this.path_matcher_enabled && paths.iter().find(|project_path| this.path_matcher.is_match(project_path.path.clone())).is_none() {
-                        log::debug!("diagnostics ignored for server {language_server_id}. path filter mismatch");
-                        return;
-                    };
-
-                    let paths_to_update = if this.path_matcher_enabled { paths.iter().filter(|project_path| this.path_matcher.is_match(project_path.path.clone())).cloned().collect() } else { paths.clone() };
-                    this.paths_to_update.extend(paths_to_update);
+                    this.paths_to_update.extend(paths.clone());
                     this.diagnostic_summary_update = cx.spawn(async move |this, cx| {
                         cx.background_executor()
                             .timer(DIAGNOSTICS_SUMMARY_UPDATE_DELAY)
