@@ -1610,6 +1610,12 @@ async fn test_buffer_diagnostics(cx: &mut TestAppContext) {
         }),
         path: Arc::from(Path::new("main.rs")),
     };
+    let buffer = project
+        .update(cx, |project, cx| {
+            project.open_buffer(project_path.clone(), cx)
+        })
+        .await
+        .ok();
 
     // Create the diagnostics for `main.rs`.
     let language_server_id = LanguageServerId(0);
@@ -1680,14 +1686,22 @@ async fn test_buffer_diagnostics(cx: &mut TestAppContext) {
     });
 
     let buffer_diagnostics = window.build_entity(cx, |window, cx| {
-        BufferDiagnosticsEditor::new(project_path.clone(), project.clone(), true, window, cx)
+        BufferDiagnosticsEditor::new(
+            project_path.clone(),
+            project.clone(),
+            buffer,
+            true,
+            window,
+            cx,
+        )
     });
     let editor = buffer_diagnostics.update(cx, |buffer_diagnostics, _| {
         buffer_diagnostics.editor().clone()
     });
 
-    // Since the buffer is opened in a background task, we need to wait a little
-    // bit to ensure that the buffer diagnostic's editor content is rendered.
+    // Since the excerpt updates is handled by a background task, we need to
+    // wait a little bit to ensure that the buffer diagnostic's editor content
+    // is rendered.
     cx.executor()
         .advance_clock(DIAGNOSTICS_UPDATE_DELAY + Duration::from_millis(10));
 
@@ -1750,6 +1764,12 @@ async fn test_buffer_diagnostics_without_warnings(cx: &mut TestAppContext) {
         }),
         path: Arc::from(Path::new("main.rs")),
     };
+    let buffer = project
+        .update(cx, |project, cx| {
+            project.open_buffer(project_path.clone(), cx)
+        })
+        .await
+        .ok();
 
     let language_server_id = LanguageServerId(0);
     let uri = lsp::Url::from_file_path(path!("/test/main.rs")).unwrap();
@@ -1801,6 +1821,7 @@ async fn test_buffer_diagnostics_without_warnings(cx: &mut TestAppContext) {
         BufferDiagnosticsEditor::new(
             project_path.clone(),
             project.clone(),
+            buffer,
             include_warnings,
             window,
             cx,
@@ -1811,8 +1832,9 @@ async fn test_buffer_diagnostics_without_warnings(cx: &mut TestAppContext) {
         buffer_diagnostics.editor().clone()
     });
 
-    // Since the buffer is opened in a background task, we need to wait a little
-    // bit to ensure that the buffer diagnostic's editor content is rendered.
+    // Since the excerpt updates is handled by a background task, we need to
+    // wait a little bit to ensure that the buffer diagnostic's editor content
+    // is rendered.
     cx.executor()
         .advance_clock(DIAGNOSTICS_UPDATE_DELAY + Duration::from_millis(10));
 
@@ -1871,6 +1893,12 @@ async fn test_buffer_diagnostics_multiple_servers(cx: &mut TestAppContext) {
         }),
         path: Arc::from(Path::new("main.rs")),
     };
+    let buffer = project
+        .update(cx, |project, cx| {
+            project.open_buffer(project_path.clone(), cx)
+        })
+        .await
+        .ok();
 
     // Create the diagnostics for `main.rs`.
     // Two warnings are being created, one for each language server, in order to
@@ -1925,14 +1953,22 @@ async fn test_buffer_diagnostics_multiple_servers(cx: &mut TestAppContext) {
     });
 
     let buffer_diagnostics = window.build_entity(cx, |window, cx| {
-        BufferDiagnosticsEditor::new(project_path.clone(), project.clone(), true, window, cx)
+        BufferDiagnosticsEditor::new(
+            project_path.clone(),
+            project.clone(),
+            buffer,
+            true,
+            window,
+            cx,
+        )
     });
     let editor = buffer_diagnostics.update(cx, |buffer_diagnostics, _| {
         buffer_diagnostics.editor().clone()
     });
 
-    // Since the buffer is opened in a background task, we need to wait a little
-    // bit to ensure that the buffer diagnostic's editor content is rendered.
+    // Since the excerpt updates is handled by a background task, we need to
+    // wait a little bit to ensure that the buffer diagnostic's editor content
+    // is rendered.
     cx.executor()
         .advance_clock(DIAGNOSTICS_UPDATE_DELAY + Duration::from_millis(10));
 
