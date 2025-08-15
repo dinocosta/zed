@@ -22,7 +22,7 @@ use settings::Settings;
 use std::{cmp::Ordering, sync::Arc};
 use text::{Anchor, BufferSnapshot, OffsetRangeExt};
 use ui::{Button, ButtonStyle, Icon, IconName, Label, Tooltip, h_flex, prelude::*};
-use util::{ResultExt, paths::PathExt};
+use util::paths::PathExt;
 use workspace::{
     ItemHandle, ToolbarItemLocation, Workspace,
     item::{BreadcrumbText, Item, TabContentParams},
@@ -78,6 +78,7 @@ impl BufferDiagnosticsEditor {
     pub fn new(
         project_path: ProjectPath,
         project_handle: Entity<Project>,
+        buffer: Option<Entity<Buffer>>,
         include_warnings: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -183,14 +184,14 @@ impl BufferDiagnosticsEditor {
 
         let diagnostics = vec![];
         let update_excerpts_task = None;
-        let buffer_diagnostics_editor = Self {
+        let mut buffer_diagnostics_editor = Self {
             project: project_handle,
             focus_handle,
             editor,
             diagnostics,
             blocks: Default::default(),
             multibuffer,
-            buffer: None,
+            buffer,
             project_path,
             summary,
             include_warnings,
@@ -198,23 +199,7 @@ impl BufferDiagnosticsEditor {
             _subscription: project_event_subscription,
         };
 
-        let project = buffer_diagnostics_editor.project.clone();
-        let project_path = buffer_diagnostics_editor.project_path.clone();
-
-        cx.spawn_in(window, async move |editor, cx| {
-            let buffer = project
-                .update(cx, |project, cx| project.open_buffer(project_path, cx))?
-                .await
-                .log_err();
-
-            editor.update_in(cx, |editor, window, cx| {
-                editor.buffer = buffer;
-                editor.update_all_diagnostics(window, cx);
-                cx.notify();
-            })
-        })
-        .detach();
-
+        buffer_diagnostics_editor.update_all_diagnostics(window, cx);
         buffer_diagnostics_editor
     }
 
@@ -228,9 +213,8 @@ impl BufferDiagnosticsEditor {
         // finding the project path for the buffer.
         // If there's no active editor with a project path, avoiding deploying
         // the buffer diagnostics view.
-        if let Some(project_path) = workspace
-            .active_item_as::<Editor>(cx)
-            .map_or(None, |editor| editor.project_path(cx))
+        if let Some(editor) = workspace.active_item_as::<Editor>(cx)
+            && let Some(project_path) = editor.project_path(cx)
         {
             // Check if there's already a `BufferDiagnosticsEditor` tab for this
             // same path, and if so, focus on that one instead of creating a new
@@ -251,6 +235,7 @@ impl BufferDiagnosticsEditor {
                     Self::new(
                         project_path,
                         workspace.project().clone(),
+                        editor.read(cx).buffer().read(cx).as_singleton(),
                         include_warnings,
                         window,
                         cx,
