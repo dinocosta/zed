@@ -95,19 +95,20 @@ impl BufferDiagnosticsEditor {
                     buffer_diagnostics_editor.update_all_excerpts(window, cx);
                 }
                 Event::DiagnosticsUpdated {
-                    path,
+                    paths,
                     language_server_id,
                 } => {
                     // When diagnostics have been updated, the
                     // `BufferDiagnosticsEditor` should update its state only if
-                    // the path matches its `project_path`, otherwise the event should be ignored.
-                    if *path == buffer_diagnostics_editor.project_path {
+                    // one of the paths matches its `project_path`, otherwise
+                    // the event should be ignored.
+                    if paths.iter().find(|project_path| **project_path == buffer_diagnostics_editor.project_path).is_some() {
                         buffer_diagnostics_editor.update_diagnostic_summary(cx);
 
                         if buffer_diagnostics_editor.editor.focus_handle(cx).contains_focused(window, cx) || buffer_diagnostics_editor.focus_handle.contains_focused(window, cx) {
-                            log::debug!("diagnostics updated for server {language_server_id}, path {path:?}. recording change");
+                            log::debug!("diagnostics updated for server {language_server_id}. recording change");
                         } else {
-                            log::debug!("diagnostics updated for server {language_server_id}, path {path:?}. updating excerpts");
+                            log::debug!("diagnostics updated for server {language_server_id}. updating excerpts");
                             buffer_diagnostics_editor.update_all_excerpts(window, cx);
                         }
                     }
