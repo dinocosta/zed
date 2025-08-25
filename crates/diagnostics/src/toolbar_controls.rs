@@ -1,21 +1,48 @@
 use std::sync::Arc;
 
 use crate::{BufferDiagnosticsEditor, ProjectDiagnosticsEditor, ToggleDiagnosticsRefresh};
-use gpui::{Context, EventEmitter, ParentElement, Render, WeakEntity, Window};
+use gpui::{Context, EventEmitter, ParentElement, Render, Window};
+use project::ProjectPath;
 use ui::prelude::*;
 use ui::{IconButton, IconButtonShape, IconName, Tooltip};
 use workspace::{ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, item::ItemHandle};
 
 pub struct ToolbarControls {
-    editor: Option<DiagnosticsEditorHandle>,
+    editor: Option<Box<dyn DiagnosticsToolbarEditor>>,
 }
 
-enum DiagnosticsEditorHandle {
-    Project(WeakEntity<ProjectDiagnosticsEditor>),
-    Buffer(WeakEntity<BufferDiagnosticsEditor>),
+pub(crate) trait DiagnosticsToolbarEditor: Send + Sync {
+    /// Informs the toolbar whether warnings are included in the diagnostics.
+    fn include_warnings(&self, cx: &App) -> bool;
+    /// Toggles whether warning diagnostics should be displayed by the
+    /// diagnostics editor.
+    fn toggle_warnings(&self, window: &mut Window, cx: &mut App);
+    /// Indicates whether any of the excerpts displayed by the diagnostics
+    /// editor are stale.
+    fn has_stale_excerpts(&self, cx: &App) -> bool;
+    /// Indicates whether the diagnostics editor is currently updating the
+    /// diagnostics.
+    fn is_updating(&self, cx: &App) -> bool;
+    /// To be deprecated, as cargo-specific details of the diagnostics
+    /// implementations are being removed.
+    fn cargo_diagnostics_sources(&self, cx: &App) -> Vec<ProjectPath>;
+    /// Requests that the diagnostics editor stop updating the diagnostics.
+    fn stop_updating(&self, cx: &mut App);
+    /// Requests that the diagnostics editor updates the displayed diagnostics
+    /// with the latest information.
+    fn refresh_diagnostics(
+        &self,
+        cargo_diagnostics_sources: Arc<Vec<ProjectPath>>,
+        window: &mut Window,
+        cx: &mut App,
+    );
+    /// Returns a list of diagnostics for the provided buffer id.
+    fn get_diagnostics_for_buffer(
+        &self,
+        buffer_id: text::BufferId,
+        cx: &App,
+    ) -> Vec<language::DiagnosticEntry<text::Anchor>>;
 }
-
-impl DiagnosticsEditorHandle {}
 
 impl Render for ToolbarControls {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -25,34 +52,11 @@ impl Render for ToolbarControls {
         let mut cargo_diagnostics_sources = Vec::new();
 
         match &self.editor {
-            Some(DiagnosticsEditorHandle::Project(editor)) => {
-                if let Some(editor) = editor.upgrade() {
-                    let diagnostics = editor.read(cx);
-                    include_warnings = diagnostics.include_warnings;
-                    has_stale_excerpts = !diagnostics.paths_to_update.is_empty();
-                    cargo_diagnostics_sources = diagnostics.cargo_diagnostics_sources(cx);
-                    is_updating = diagnostics.cargo_diagnostics_fetch.fetch_task.is_some()
-                        || diagnostics.update_excerpts_task.is_some()
-                        || diagnostics
-                            .project
-                            .read(cx)
-                            .language_servers_running_disk_based_diagnostics(cx)
-                            .next()
-                            .is_some();
-                }
-            }
-            Some(DiagnosticsEditorHandle::Buffer(editor)) => {
-                if let Some(editor) = editor.upgrade() {
-                    let diagnostics = editor.read(cx);
-                    include_warnings = diagnostics.include_warnings;
-                    is_updating = diagnostics.update_excerpts_task.is_some()
-                        || diagnostics
-                            .project
-                            .read(cx)
-                            .language_servers_running_disk_based_diagnostics(cx)
-                            .next()
-                            .is_some();
-                }
+            Some(editor) => {
+                include_warnings = editor.include_warnings(cx);
+                has_stale_excerpts = editor.has_stale_excerpts(cx);
+                cargo_diagnostics_sources = editor.cargo_diagnostics_sources(cx);
+                is_updating = editor.is_updating(cx);
             }
             None => {}
         }
@@ -86,31 +90,9 @@ impl Render for ToolbarControls {
                             ))
                             .on_click(cx.listener(move |toolbar_controls, _, _, cx| {
                                 match toolbar_controls.editor() {
-                                    Some(DiagnosticsEditorHandle::Buffer(
-                                        buffer_diagnostics_editor,
-                                    )) => {
-                                        let _ = buffer_diagnostics_editor.update(
-                                            cx,
-                                            |buffer_diagnostics_editor, cx| {
-                                                buffer_diagnostics_editor.update_excerpts_task =
-                                                    None;
-                                                cx.notify();
-                                            },
-                                        );
-                                    }
-                                    Some(DiagnosticsEditorHandle::Project(
-                                        project_diagnostics_editor,
-                                    )) => {
-                                        let _ = project_diagnostics_editor.update(
-                                            cx,
-                                            |project_diagnostics_editor, cx| {
-                                                project_diagnostics_editor
-                                                    .stop_cargo_diagnostics_fetch(cx);
-                                                project_diagnostics_editor.update_excerpts_task =
-                                                    None;
-                                                cx.notify();
-                                            },
-                                        );
+                                    Some(editor) => {
+                                        editor.stop_updating(cx);
+                                        cx.notify();
                                     }
                                     None => {}
                                 }
@@ -132,34 +114,11 @@ impl Render for ToolbarControls {
                                         Arc::clone(&cargo_diagnostics_sources);
 
                                     match toolbar_controls.editor() {
-                                        Some(DiagnosticsEditorHandle::Buffer(
-                                            buffer_diagnostics_editor,
-                                        )) => {
-                                            let _ = buffer_diagnostics_editor.update(
+                                        Some(editor) => {
+                                            editor.refresh_diagnostics(
+                                                Arc::clone(&cargo_diagnostics_sources),
+                                                window,
                                                 cx,
-                                                |buffer_diagnostics_editor, cx| {
-                                                    buffer_diagnostics_editor
-                                                        .update_all_excerpts(window, cx);
-                                                },
-                                            );
-                                        }
-                                        Some(DiagnosticsEditorHandle::Project(
-                                            project_diagnostics_editor,
-                                        )) => {
-                                            let _ = project_diagnostics_editor.update(
-                                                cx,
-                                                |project_diagnostics_editor, cx| {
-                                                    if fetch_cargo_diagnostics {
-                                                        project_diagnostics_editor
-                                                            .fetch_cargo_diagnostics(
-                                                                cargo_diagnostics_sources,
-                                                                cx,
-                                                            );
-                                                    } else {
-                                                        project_diagnostics_editor
-                                                            .update_all_excerpts(window, cx);
-                                                    }
-                                                },
                                             );
                                         }
                                         None => {}
@@ -175,31 +134,8 @@ impl Render for ToolbarControls {
                     .shape(IconButtonShape::Square)
                     .tooltip(Tooltip::text(warning_tooltip))
                     .on_click(cx.listener(|this, _, window, cx| match &this.editor {
-                        Some(DiagnosticsEditorHandle::Project(project_diagnostics_editor)) => {
-                            let _ = project_diagnostics_editor.update(
-                                cx,
-                                |project_diagnostics_editor, cx| {
-                                    project_diagnostics_editor.toggle_warnings(
-                                        &Default::default(),
-                                        window,
-                                        cx,
-                                    );
-                                },
-                            );
-                        }
-                        Some(DiagnosticsEditorHandle::Buffer(buffer_diagnostics_editor)) => {
-                            let _ = buffer_diagnostics_editor.update(
-                                cx,
-                                |buffer_diagnostics_editor, cx| {
-                                    buffer_diagnostics_editor.toggle_warnings(
-                                        &Default::default(),
-                                        window,
-                                        cx,
-                                    );
-                                },
-                            );
-                        }
-                        _ => {}
+                        Some(editor) => editor.toggle_warnings(window, cx),
+                        None => {}
                     })),
             )
     }
@@ -216,10 +152,10 @@ impl ToolbarItemView for ToolbarControls {
     ) -> ToolbarItemLocation {
         if let Some(pane_item) = active_pane_item.as_ref() {
             if let Some(editor) = pane_item.downcast::<ProjectDiagnosticsEditor>() {
-                self.editor = Some(DiagnosticsEditorHandle::Project(editor.downgrade()));
+                self.editor = Some(Box::new(editor.downgrade()));
                 ToolbarItemLocation::PrimaryRight
             } else if let Some(editor) = pane_item.downcast::<BufferDiagnosticsEditor>() {
-                self.editor = Some(DiagnosticsEditorHandle::Buffer(editor.downgrade()));
+                self.editor = Some(Box::new(editor.downgrade()));
                 ToolbarItemLocation::PrimaryRight
             } else {
                 ToolbarItemLocation::Hidden
@@ -241,7 +177,7 @@ impl ToolbarControls {
         ToolbarControls { editor: None }
     }
 
-    fn editor(&self) -> Option<&DiagnosticsEditorHandle> {
+    fn editor(&self) -> Option<&Box<dyn DiagnosticsToolbarEditor>> {
         self.editor.as_ref()
     }
 }
